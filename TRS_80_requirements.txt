@@ -1,0 +1,9 @@
+anthropic
+torch
+transformers
+pyinstaller
+llama-cpp-python
+accelerate
+
+einops
+torchvision
