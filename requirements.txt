@@ -1,0 +1,10 @@
+
+torch
+anthropic
+transformers
+pyinstaller
+accelerate
+flash-attention
+einops
+torchvisionpi
+requests

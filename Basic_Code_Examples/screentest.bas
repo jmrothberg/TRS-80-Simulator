@@ -1,0 +1,11 @@
+10 FOR X = 1 TO 128
+20 FOR Y = 1 TO 48
+30 SET (X, Y)
+40 NEXT Y
+50 NEXT X
+60 END
+
+
+
+
+

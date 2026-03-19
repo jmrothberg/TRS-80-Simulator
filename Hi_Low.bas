@@ -1,0 +1,128 @@
+10 REM START OF PROGRAM
+20 LET N = RND(101)
+40 LET C = 0                 
+50 PRINT "HIGH LOW GAME"
+55 PRINT "GUESS COUNT: ", C
+60 PRINT "GUESS THE NUMBER BETWEEN 0 AND 100"
+70 INPUT "ENTER YOUR GUESS: "; G
+75 LET C = C + 1
+100 IF G < N THEN GOTO 300
+120 IF G > N THEN GOTO 400
+200 PRINT "YOU GOT IT!"
+210 GOTO 500
+300 PRINT "TOO LOW"
+310 GOTO 55
+400 PRINT "TOO HIGH"
+410 GOTO 55
+
+500 PRINT "THE END"
+600 END            
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
