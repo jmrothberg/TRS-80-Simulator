@@ -1,17 +1,100 @@
-#JMR TRS-80 BASIC simulator
-#Fully working AUG 19, 2024
-#Added step, debug window and variables window
-#AUG 21 added multiple commands per line and additonal functions
-#AUG 23 added graphics commands
-#AUG 27 corrected POINT function, explicit LET, GUI, corrected coordinates, variables robust
-#SEP 5 new eval function that handled nested parentheses better and faster can do B((i-1)*15)
-#Sept 7 needed for mac to run on python 3.11.4 the new one 3.12.x was not working in pyinstaller buggy
-#July 6 2025 added Ollama support, added ability to type into the main screen and original TRS-80 prompt
-#Sept 24 2025 Adjusted for 7" screen, no 2x scaling on Raspberry Pi, added LLM support error checking
-#Jan 21 2026 Added Hailo-10H AI accelerator support for LLM inference on Raspberry Pi
-#           - Integrated HailoRT runtime for GPU-accelerated AI models
-#           - Added auto-download of Hailo-compiled models (qwen2.5, llama3.2, etc.)
-#           - Optimized for ARM64 Raspberry Pi 5 with PCIe Hailo-10H card
+# ===========================================================================
+#  TRS-80 Model I Level II BASIC Simulator
+# ===========================================================================
+#  Author: Jonathan Rothberg (JMR)
+#  First working version: Aug 19, 2024
+#
+#  Changelog:
+#    Aug 21 2024 - Multiple statements per line, additional functions
+#    Aug 23 2024 - Graphics commands (SET, RESET, POINT)
+#    Aug 27 2024 - POINT fix, implicit LET, GUI polish, coordinate fixes
+#    Sep  5 2024 - Nested-paren expression evaluator rewrite
+#    Sep  7 2024 - Pin to Python 3.11 (PyInstaller compat)
+#    Jul  6 2025 - Ollama support, immediate-mode green-screen prompt
+#    Sep 24 2025 - 7" Raspberry Pi display, LLM error handling
+#    Jan 21 2026 - Hailo-10H AI accelerator for Pi LLM inference
+#    Mar 22 2026 - Performance optimizations (single-pass keyword
+#                  replacement, cached fonts/dimensions, canvas
+#                  itemconfigure, guarded debug prints)
+#
+# ---------------------------------------------------------------------------
+#  HOW THE INTERPRETER WORKS  (read this before diving into the code)
+# ---------------------------------------------------------------------------
+#
+#  The interpreter turns BASIC source text into execution through a five-
+#  stage pipeline that runs inside a single Tkinter main-loop:
+#
+#  1. EDITING & STORAGE
+#     The user types BASIC lines into the input area (ScrolledText widget)
+#     or directly on the green screen in immediate mode.  Lines with a
+#     leading number are stored in `self.stored_program`; lines without a
+#     number execute immediately.
+#
+#  2. PREPROCESSING  (preprocess_program)
+#     Before RUN, multi-statement lines like "10 A=1: B=2" are split on
+#     colons into separate entries ("10 A=1", "10.1 B=2").  Colons that
+#     appear inside quoted strings or after IF/THEN/ELSE are preserved.
+#     DATA statements are pre-scanned into self.data_values so READ can
+#     access them in program order regardless of execution flow.
+#
+#  3. EXECUTION LOOP  (execute_next_line)
+#     A while-loop walks self.current_line_index through three parallel
+#     arrays built at RUN time:
+#       _line_numbers[i]   – the BASIC line number (float, supports 10.1)
+#       _line_commands[i]   – the command text after the line number
+#       _line_cmd_words[i]  – the first keyword, pre-extracted for dispatch
+#     Each iteration calls execute_command(), which returns:
+#       None   → advance to next line
+#       int/float → GOTO that line number (binary-searched via find_line_index)
+#     The loop yields to the Tkinter event loop every N iterations so the
+#     GUI stays responsive and INKEY$/PEEK(14400) can poll keystrokes.
+#
+#  4. COMMAND DISPATCH  (execute_command → _command_handlers dict)
+#     The pre-extracted keyword is looked up in self._command_handlers, a
+#     dict mapping strings like 'PRINT', 'FOR', 'GOTO' to _cmd_* methods.
+#     If the keyword isn't found but the line contains '=', it's treated
+#     as an implicit LET ("A=5" becomes "LET A=5").
+#
+#  5. EXPRESSION EVALUATION  (evaluate_expression → _eval_nested)
+#     Expressions like "A*2+RND(5)" go through these stages:
+#       a. Fast paths – pure integers, negative integers, and simple
+#          variable lookups return immediately without regex.
+#       b. INKEY$ replacement – checked once per expression.
+#       c. Keyword translation – a single combined regex pass converts
+#          BASIC operators (AND→and, OR→or, MOD→%, ^→**, =→==, <>→!=)
+#          and bare RND to Python equivalents.  Matches inside quoted
+#          strings are skipped using a bytearray quote-map.
+#       d. Built-in functions – a regex matches function calls like
+#          INT(...), RND(...), LEFT$(...); the dispatch table
+#          _builtin_functions maps each name to a handler.
+#       e. Array substitution – array references like A(I) are resolved
+#          from self.array_variables.
+#       f. Variable substitution – scalar variables are replaced longest-
+#          first so that "AB" doesn't clobber "A" inside "AB".
+#       g. Comparison wrapping – operators like >, <, >= are rewritten
+#          into function calls _gt(a,b) that return -1 (true) or 0 (false)
+#          for TRS-80 semantics.
+#       h. Python eval() – the fully-transformed string is evaluated in
+#          a restricted namespace containing only math helpers and the
+#          comparison/logic wrappers.
+#
+#  SCREEN MODEL
+#     Text: 64 columns x 16 rows stored in self.screen_content[][].
+#     Graphics: 128 x 48 pixel grid stored in self.pixel_matrix[][].
+#     Each text cell covers a 2x3 block of graphics pixels.
+#     The Tkinter Canvas draws text items tagged "c{row}_{col}" and pixel
+#     rectangles tagged "p{x}_{y}" so items are bounded and reusable.
+#     Graphics SET/RESET calls are batched in _pending_graphics and flushed
+#     every 20 operations or at GUI-update boundaries.
+#
+#  KEY DATA STRUCTURES
+#     scalar_variables   – dict {name: value}  (e.g. {"A": 5, "N$": "HI"})
+#     array_variables    – dict {name: list}   (e.g. {"A": [0,0,0,...]})
+#     for_loops          – OrderedDict {var: {start, end, step, current, ...}}
+#     gosub_stack        – list of return-line indices
+#     _eval_namespace    – restricted dict passed to Python's eval()
+#
+# ===========================================================================
 import tkinter as tk
 from tkinter import scrolledtext, filedialog, messagebox
 import re
@@ -28,6 +111,9 @@ INITIAL_HEIGHT = 288  # Reduced from 288 to 192 for 7" screen
 class TRS80Simulator:
     # ============================================================
     #  SECTION: Init & Configuration
+    #  Build the Tkinter GUI (Canvas, input area, buttons), set up
+    #  interpreter state, compile regex patterns, and initialize
+    #  the command/function dispatch tables.
     # ============================================================
     def __init__(self, master):
         self.master = master
@@ -51,6 +137,9 @@ class TRS80Simulator:
 
         # Create the TRS-80 screen (128x48 pixels, but each pixel is 4 screen pixels for 7" screen)
         self.pixel_size = PIXEL_SIZE * self.scale_factor  # Each pixel is 4 screen pixels, scaled
+        self._char_w = self.pixel_size * 2   # cached character cell width
+        self._char_h = self.pixel_size * 3   # cached character cell height
+        self._screen_font = ("Courier", self.base_font_size * self.scale_factor)
         self.screen = tk.Canvas(self.screen_frame, width=INITIAL_WIDTH * self.scale_factor, height=INITIAL_HEIGHT * self.scale_factor, bg="black", highlightthickness=0)
         self.screen.pack()
         
@@ -219,7 +308,10 @@ class TRS80Simulator:
         self._init_command_handlers()
         self._init_builtin_functions()
 
-        # Optimization 3: Pre-build eval() namespace dict (reused every _eval_nested call)
+        # Restricted namespace for Python eval() in the expression evaluator.
+        # __builtins__=None prevents access to open/exec/import etc.
+        # The _gt/_lt/etc. lambdas implement TRS-80 comparison semantics
+        # (return -1 for true, 0 for false instead of Python's True/False).
         self._eval_globals = {"__builtins__": None}
         self._eval_namespace = {
             "int": int, "float": float, "str": str,
@@ -340,18 +432,18 @@ class TRS80Simulator:
         if self.cursor_canvas_item:
             self.screen.delete(self.cursor_canvas_item)
             self.cursor_canvas_item = None
-        
+
         # Draw cursor if visible and not waiting for input (during INPUT commands, cursor should be visible)
         if self.cursor_visible or self.waiting_for_input:
-            x = self.cursor_col * self.pixel_size * 2
-            y = self.cursor_row * self.pixel_size * 3
-            
+            x = self.cursor_col * self._char_w
+            y = self.cursor_row * self._char_h
+
             # Draw a solid block cursor like the original TRS-80 (ASCII 143 or solid block)
             self.cursor_canvas_item = self.screen.create_rectangle(
-                x, y, 
-                x + self.pixel_size * 2, 
-                y + self.pixel_size * 3, 
-                fill="lime", 
+                x, y,
+                x + self._char_w,
+                y + self._char_h,
+                fill="lime",
                 outline="lime",
                 tags="cursor"
             )
@@ -363,7 +455,14 @@ class TRS80Simulator:
         self.update_cursor_display()
 
     def _compile_regex_patterns(self):
-        """Pre-compile frequently used regex patterns for performance"""
+        """Pre-compile all regex patterns used by the interpreter.
+
+        Patterns are stored in self._regex_cache keyed by short names.
+        This avoids re-compiling the same pattern on every expression
+        evaluation or command parse.  The 'all_keywords' pattern is the
+        combined single-pass regex used in _eval_nested to translate
+        BASIC operators to Python equivalents in one re.sub call.
+        """
         self._regex_cache['array_match'] = re.compile(r'(\w+\$?)\((.+)\)')
         self._regex_cache['print_at'] = re.compile(r'PRINT@\s*([^,;]+)\s*,?\s*(.*)')
         self._regex_cache['input_prompt'] = re.compile(r'INPUT\s*"(.*)"\s*;\s*(\w+\$?(?:\(.*?\))?)')
@@ -388,9 +487,22 @@ class TRS80Simulator:
         self._regex_cache['not_equal_op'] = re.compile(r'<>')
         self._regex_cache['exp_op'] = re.compile(r'\^')
         self._regex_cache['inkey'] = re.compile(r'\bINKEY\$')
+        # Combined keyword regex for single-pass replacement in _eval_nested
+        self._regex_cache['all_keywords'] = re.compile(
+            r'\bRND\b(?!\()'     # bare RND (no parens)
+            r'|\bMOD\b'
+            r'|\bOR\b'
+            r'|\bAND\b'
+            r'|\bNOT\b'
+            r'|<>'               # not-equal
+            r'|(?<![=<>])=(?!=)' # single = (not ==, <=, >=, <>)
+            r'|\^'               # exponent
+        )
 
     # ============================================================
     #  SECTION: LLM Support
+    #  Toggle, open, and close the optional AI companion window
+    #  (TRS80LLMSupport) which can help write and debug BASIC code.
     # ============================================================
     def toggle_llm_support(self):
         self.llm_support_active = not self.llm_support_active
@@ -481,6 +593,10 @@ class TRS80Simulator:
     
     # ============================================================
     #  SECTION: Debug & Variables Windows
+    #  The debug window shows a timestamped execution trace
+    #  (line number, step count, variable assignments, errors).
+    #  The variables window shows live scalar/array/loop state.
+    #  Both are Toplevel windows positioned for 7" screens.
     # ============================================================
     def create_debug_window(self):
         if self.debug_window is None or not self.debug_window.winfo_exists():
@@ -761,6 +877,12 @@ class TRS80Simulator:
 
     # ============================================================
     #  SECTION: Input Handling
+    #  Keyboard events go through on_key_press, which routes to:
+    #    - BREAK handling (Esc / Ctrl+C) during program execution
+    #    - Keyboard buffer (PEEK 14400 / INKEY$) during RUN
+    #    - Immediate-mode key handler when no program is running
+    #  The BASIC INPUT statement temporarily rebinds the Canvas to
+    #  handle_input_key / handle_input_return, then resumes execution.
     # ============================================================
     def set_screen_focus(self):
         self.screen.config(state=tk.NORMAL)
@@ -805,6 +927,8 @@ class TRS80Simulator:
 
     # ============================================================
     #  SECTION: GUI Setup & Menus
+    #  Right-click context menus for cut/copy/paste on the green
+    #  screen Canvas and the input ScrolledText area.
     # ============================================================
     def create_right_click_menu(self):
         self.right_click_menu = tk.Menu(self.master, tearoff=0)
@@ -933,6 +1057,14 @@ class TRS80Simulator:
 
     # ============================================================
     #  SECTION: Screen Rendering
+    #  The TRS-80 display is a Tkinter Canvas (green on black).
+    #  Text characters are Canvas text items tagged "c{row}_{col}";
+    #  graphics pixels are rectangles tagged "p{x}_{y}".
+    #  print_to_screen writes characters and uses itemconfigure to
+    #  update existing items (avoids delete+create overhead).
+    #  _scroll_screen_up shifts screen_content and pixel_matrix up
+    #  by one text row (3 pixel rows), then redraws.
+    #  redraw_screen does a full repaint from the data arrays.
     # ============================================================
     def clear_input_area(self):
         self.input_area.delete(1.0, tk.END)
@@ -942,7 +1074,8 @@ class TRS80Simulator:
         self.screen_content = self.screen_content[1:] + [[' ' for _ in range(64)]]
         self.cursor_row = 15
         self.pixel_matrix = self.pixel_matrix[3:] + [[0 for _ in range(128)] for _ in range(3)]
-        self._active_pixels = {(x, y) for y in range(48) for x in range(128) if self.pixel_matrix[y][x]}
+        # O(active) set-shift instead of O(6144) full scan
+        self._active_pixels = {(x, y - 3) for x, y in self._active_pixels if y >= 3}
         self.redraw_screen()
 
     def clear_variables_button_cmd(self):
@@ -988,6 +1121,11 @@ class TRS80Simulator:
     
 
     def new_program(self):
+        """Reset all interpreter state for a fresh program.
+
+        Clears variables, loop stacks, display, and the pre-parsed line
+        arrays.  Called by RUN (before re-parsing), NEW, and on startup.
+        """
         self.scalar_variables = {}
         self.array_variables = {}
         self.for_loops = {}
@@ -1008,6 +1146,8 @@ class TRS80Simulator:
         self._last_var_count = 0
         # Optimization 6: Cached compiled array patterns
         self._array_patterns = {}
+        # Cached compiled variable regex patterns
+        self._var_regex_cache = {}
         self.screen_content = [[' ' for _ in range(64)] for _ in range(16)]
         self.pixel_matrix = [[0 for _ in range(128)] for _ in range(48)]
         self._active_pixels = set()
@@ -1050,6 +1190,8 @@ class TRS80Simulator:
     def print_to_screen(self, *args, end='\n'):
         text = ' '.join(str(arg) for arg in args) + end
         chars_to_draw = []  # Batch characters for drawing
+        char_w = self._char_w
+        char_h = self._char_h
 
         for char in text:
             if char == '\n' or self.cursor_col >= 64:
@@ -1061,50 +1203,49 @@ class TRS80Simulator:
             else:
                 self.screen_content[self.cursor_row][self.cursor_col] = char
                 row, col = self.cursor_row, self.cursor_col
-                x = col * self.pixel_size * 2
-                y = row * self.pixel_size * 3
-                chars_to_draw.append((x, y, char, row, col))
+                chars_to_draw.append((col * char_w, row * char_h, char, row, col))
                 self.cursor_col += 1
 
-        # Draw all characters at once using tags for bounded canvas items
+        # Draw all characters using itemconfigure when item exists, create_text otherwise
+        screen = self.screen
+        font = self._screen_font
         for x, y, char, row, col in chars_to_draw:
             tag = f"c{row}_{col}"
-            self.screen.delete(tag)
-            self.screen.create_text(x, y, text=char,
-                font=("Courier", self.base_font_size * self.scale_factor),
-                fill="lime", anchor="nw", tags=tag)
-        
+            items = screen.find_withtag(tag)
+            if items:
+                screen.itemconfigure(items[0], text=char)
+            else:
+                screen.create_text(x, y, text=char,
+                    font=font, fill="lime", anchor="nw", tags=tag)
+
         # Update cursor display after printing
         self.update_cursor_display()
-        
-        # Only update display once at the end
-        if chars_to_draw or text.endswith('\n'):
-            self.master.update_idletasks()
 
 
     def redraw_screen(self):
         self.screen.delete("all")
+        ps = self.pixel_size
 
         # Redraw only active pixels (performance: skip empty positions)
         for x, y in self._active_pixels:
             self.screen.create_rectangle(
-                x * self.pixel_size, y * self.pixel_size,
-                (x + 1) * self.pixel_size, (y + 1) * self.pixel_size,
+                x * ps, y * ps,
+                (x + 1) * ps, (y + 1) * ps,
                 fill="lime", outline="lime",
                 tags=f"p{x}_{y}"
             )
 
         # Redraw text characters with tags for bounded canvas items
+        char_w = self._char_w
+        char_h = self._char_h
+        font = self._screen_font
         for row in range(16):
             for col in range(64):
                 char = self.screen_content[row][col]
                 if char != ' ':
-                    x = col * self.pixel_size * 2
-                    y = row * self.pixel_size * 3
                     tag = f"c{row}_{col}"
-                    self.screen.create_text(x, y, text=char,
-                        font=("Courier", self.base_font_size * self.scale_factor),
-                        fill="lime", anchor="nw", tags=tag)
+                    self.screen.create_text(col * char_w, row * char_h, text=char,
+                        font=font, fill="lime", anchor="nw", tags=tag)
 
     
     def handle_input_key(self, event):
@@ -1116,9 +1257,9 @@ class TRS80Simulator:
                     self._scroll_screen_up()
                     self.cursor_col = 0
                 
-                x = self.cursor_col * self.pixel_size * 2
-                y = self.cursor_row * self.pixel_size * 3
-                self.screen.create_text(x, y, text=event.char.upper(), font=("Courier", self.base_font_size * self.scale_factor), fill="lime", anchor="nw")
+                x = self.cursor_col * self._char_w
+                y = self.cursor_row * self._char_h
+                self.screen.create_text(x, y, text=event.char.upper(), font=self._screen_font, fill="lime", anchor="nw")
                 
                 self.screen_content[self.cursor_row][self.cursor_col] = event.char.upper()
                 self.cursor_col += 1
@@ -1148,9 +1289,9 @@ class TRS80Simulator:
                     self.cursor_col = 63
                 
                 # Clear the character on the canvas
-                x = self.cursor_col * self.pixel_size * 2
-                y = self.cursor_row * self.pixel_size * 3
-                self.screen.create_rectangle(x, y, x + self.pixel_size * 2, y + self.pixel_size * 3, fill="black", outline="black")
+                x = self.cursor_col * self._char_w
+                y = self.cursor_row * self._char_h
+                self.screen.create_rectangle(x, y, x + self._char_w, y + self._char_h, fill="black", outline="black")
                 
                 # Update the screen content
                 self.screen_content[self.cursor_row][self.cursor_col] = ' '
@@ -1402,8 +1543,22 @@ class TRS80Simulator:
     
     # ============================================================
     #  SECTION: Interpreter Core — Run & Execute
+    #  run_program: syncs the input area, preprocesses (colon-split),
+    #    sorts by line number, builds parallel arrays (_line_numbers,
+    #    _line_commands, _line_cmd_words), pre-scans DATA, then enters
+    #    execute_next_line.
+    #  execute_next_line: tight while-loop that walks current_line_index
+    #    forward, dispatching each line through execute_command.
+    #    Yields to Tkinter periodically (update_idletasks / update)
+    #    so the GUI stays responsive.
+    #  preprocess_program: splits multi-statement lines on unquoted
+    #    colons, preserving colons after IF/THEN/ELSE and inside strings.
     # ============================================================
     def run_program(self):
+        """Entry point for RUN.  Resets state, preprocesses the source,
+        builds the three parallel dispatch arrays, pre-scans DATA
+        statements, then kicks off execute_next_line.
+        """
         self.new_program()
         self.input_area.unbind("<Key>")
         self.input_area.unbind("<Return>")
@@ -1417,14 +1572,26 @@ class TRS80Simulator:
             [line for line in preprocessed_program if line.strip() and line.split()[0].replace('.', '').isdigit()],
             key=lambda x: float(x.split()[0])
         )
-        # Optimization 2: Pre-parse line numbers and commands once
+        # Optimization 2: Pre-parse line numbers, commands, and command words once
         self._line_numbers = []
         self._line_commands = []
+        self._line_cmd_words = []
         for line in self.sorted_program:
             parts = line.strip().split(maxsplit=1)
             self._line_numbers.append(float(parts[0]))
-            self._line_commands.append(parts[1] if len(parts) > 1 else '')
-        # Optimization 7: Pre-scan for INKEY$ usage to decide GUI update frequency
+            cmd = parts[1] if len(parts) > 1 else ''
+            self._line_commands.append(cmd)
+            # Pre-extract cmd_word for dispatch
+            if cmd:
+                cw = cmd.split('(')[0].split()[0] if cmd else ''
+                if cw.startswith('PRINT'):
+                    cw = 'PRINT'
+                self._line_cmd_words.append(cw)
+            else:
+                self._line_cmd_words.append('')
+        # If the program uses INKEY$ or PEEK(14400) for keyboard polling,
+        # we must process Tkinter events every iteration so key presses
+        # are picked up promptly.  Otherwise we can skip most updates.
         self._uses_inkey = any('INKEY$' in line for line in self.sorted_program)
         # Pre-scan all DATA statements before execution (TRS-80 behavior)
         self._prescan_data()
@@ -1457,6 +1624,17 @@ class TRS80Simulator:
             self.debug_print(f"Pre-scanned {len(self.data_values)} DATA values")
 
     def execute_next_line(self):
+        """Main execution loop — runs until the program ends, pauses, or
+        waits for INPUT.
+
+        Walks current_line_index through the pre-parsed line arrays.
+        execute_command returns None (advance), a line number (GOTO/GOSUB),
+        or sets waiting_for_input (INPUT pauses the loop and returns to
+        the Tkinter event loop; handle_input_return resumes via after()).
+
+        GUI responsiveness: update_idletasks every iteration when INKEY$
+        is in use, otherwise every 10th; full update() every 25th.
+        """
         update_counter = 0  # Counter for batching GUI updates
         uses_inkey = getattr(self, '_uses_inkey', True)  # Optimization 7
 
@@ -1498,7 +1676,10 @@ class TRS80Simulator:
                 parts = command.split(maxsplit=1)
                 if len(parts) > 1 and parts[0].isdigit():
                     command = parts[1]
-                result = self.execute_command(command)
+                    cmd_word = None  # re-parse needed
+                else:
+                    cmd_word = self._line_cmd_words[self.current_line_index] if self.current_line_index < len(self._line_cmd_words) else None
+                result = self.execute_command(command, cmd_word=cmd_word)
                 if isinstance(result, (int,float)):
                     new_index = self.find_line_index(result)
                     if new_index != -1:
@@ -1891,6 +2072,10 @@ class TRS80Simulator:
 
     # ============================================================
     #  SECTION: TRS-80 Error Messages
+    #  Authentic TRS-80 error codes: ?SN (Syntax), ?FC (Function
+    #  Call), ?UL (Undefined Line), ?BS (Bad Subscript), ?OD (Out
+    #  of Data), ?NF (NEXT without FOR), ?RG (RETURN without GOSUB).
+    #  Each prints to the green screen and logs to the debug window.
     # ============================================================
     def _get_current_line_number(self):
         """Get current BASIC line number for error messages"""
@@ -1950,6 +2135,12 @@ class TRS80Simulator:
 
     # ============================================================
     #  SECTION: Interpreter Core — Command Dispatch
+    #  _command_handlers maps keyword strings to _cmd_* methods:
+    #    'PRINT' → _cmd_print,  'FOR' → _cmd_for,  etc.
+    #  execute_command extracts the first keyword (or uses the
+    #  pre-parsed cmd_word from the execution loop), looks it up,
+    #  and calls the handler.  If no handler matches and the line
+    #  contains '=', it's treated as implicit LET.
     # ============================================================
     def _init_command_handlers(self):
         """Initialize the command dispatch table"""
@@ -1978,30 +2169,45 @@ class TRS80Simulator:
             'END': self._cmd_end,
         }
 
-    def execute_command(self, command):
+    def execute_command(self, command, cmd_word=None):
+        """Dispatch a single BASIC statement to its handler.
+
+        Args:
+            command:  The full statement text (e.g. "PRINT A+B").
+            cmd_word: Pre-extracted first keyword (optimization: avoids
+                      re-splitting in the hot path).  None when called
+                      from IF/THEN/ELSE or immediate mode.
+        Returns:
+            None to advance to the next line, or a line number (int/float)
+            to branch (GOTO, GOSUB, FOR/NEXT loop-back).
+        """
         original_command = command
 
         if self.debug_mode:
             self._last_debug_command = original_command
 
         try:
-            # Check for implicit LET statement
-            if '=' in command and not any(command.startswith(keyword) for keyword in ['LET', 'IF', 'FOR', 'PRINT', 'INPUT', 'READ', 'DIM', 'REM']):
-                command = 'LET ' + command
-                self.debug_print(f"AUTO LET -> {command}")
-
             # Handle tape I/O commands specially (before dispatch table)
             if command.startswith('INPUT#-1'):
                 return self._cmd_input_tape(command)
             if command.startswith('PRINT#-1'):
                 return self._cmd_print_tape(command)
 
-            # Dispatch to handler
-            cmd_word = command.split('(')[0].split()[0] if command else ''
-            # Handle PRINT@ as PRINT
-            if cmd_word.startswith('PRINT'):
-                cmd_word = 'PRINT'
+            # Extract cmd_word if not pre-parsed
+            if cmd_word is None:
+                cmd_word = command.split('(')[0].split()[0] if command else ''
+                if cmd_word.startswith('PRINT'):
+                    cmd_word = 'PRINT'
+
+            # Check for implicit LET: cmd_word not in dispatch table and has '='
             handler = self._command_handlers.get(cmd_word)
+            if handler is None and '=' in command:
+                command = 'LET ' + command
+                cmd_word = 'LET'
+                handler = self._command_handlers.get(cmd_word)
+                if self.debug_mode:
+                    self.debug_print(f"AUTO LET -> {command}")
+
             if handler:
                 return handler(command)
             else:
@@ -2049,7 +2255,8 @@ class TRS80Simulator:
                 position -= 1
                 self.cursor_row = position // 64
                 self.cursor_col = position % 64
-                self.debug_print(f"PRINT@ {position + 1} -> row {self.cursor_row}, col {self.cursor_col}")
+                if self.debug_mode:
+                    self.debug_print(f"PRINT@ {position + 1} -> row {self.cursor_row}, col {self.cursor_col}")
         else:
             content = command[5:].strip()
 
@@ -2085,16 +2292,18 @@ class TRS80Simulator:
                     cursor_pos += spaces_to_add
 
         if is_print_at and output:
-            for i in range(len(output)):
-                if self.cursor_col + i < 64:
-                    x = (self.cursor_col + i) * self.pixel_size * 2
-                    y = self.cursor_row * self.pixel_size * 3
-                    self.screen.create_rectangle(
-                        x, y,
-                        x + self.pixel_size * 2,
-                        y + self.pixel_size * 3,
-                        fill="black", outline="black"
-                    )
+            # Batch clear with a single rectangle instead of per-character
+            clear_len = min(len(output), 64 - self.cursor_col)
+            if clear_len > 0:
+                x_start = self.cursor_col * self._char_w
+                y_start = self.cursor_row * self._char_h
+                self.screen.create_rectangle(
+                    x_start, y_start,
+                    x_start + clear_len * self._char_w,
+                    y_start + self._char_h,
+                    fill="black", outline="black"
+                )
+                for i in range(clear_len):
                     self.screen_content[self.cursor_row][self.cursor_col + i] = ' '
 
         if content.rstrip().endswith((';', ',')):
@@ -2120,7 +2329,8 @@ class TRS80Simulator:
                             self.array_variables[array_name][index] = str(self.evaluate_expression(value))
                         else:
                             self.array_variables[array_name][index] = self.evaluate_expression(value)
-                        self.debug_print(f"Array assignment: {array_name}[{index}] = {self.array_variables[array_name][index]}")
+                        if self.debug_mode:
+                            self.debug_print(f"Array assignment: {array_name}[{index}] = {self.array_variables[array_name][index]}")
                     else:
                         self._error_bs(array_name, index)
                 else:
@@ -2130,7 +2340,8 @@ class TRS80Simulator:
                     self.scalar_variables[var_name] = str(self.evaluate_expression(value))
                 else:
                     self.scalar_variables[var_name] = self.evaluate_expression(value)
-                self.debug_print(f"Variable assignment: {var_name} = {self.scalar_variables[var_name]}")
+                if self.debug_mode:
+                    self.debug_print(f"Variable assignment: {var_name} = {self.scalar_variables[var_name]}")
 
     def _cmd_rem(self, command):
         pass
@@ -2236,7 +2447,8 @@ class TRS80Simulator:
 
     def _cmd_goto(self, command):
         line_number = int(command[4:].strip())
-        self.debug_print(f"GOTO {line_number}")
+        if self.debug_mode:
+            self.debug_print(f"GOTO {line_number}")
         return line_number
 
     def _split_on_unquoted_colons(self, text):
@@ -2261,13 +2473,16 @@ class TRS80Simulator:
             condition, then_action, _, else_action = match.groups()
             condition_result = self.evaluate_expression(condition)
             if condition_result:
-                self.debug_print(f"IF {condition} -> TRUE; THEN {then_action}")
+                if self.debug_mode:
+                    self.debug_print(f"IF {condition} -> TRUE; THEN {then_action}")
                 return self._execute_multi_statement(then_action)
             elif else_action:
-                self.debug_print(f"IF {condition} -> FALSE; ELSE {else_action}")
+                if self.debug_mode:
+                    self.debug_print(f"IF {condition} -> FALSE; ELSE {else_action}")
                 return self._execute_multi_statement(else_action)
             else:
-                self.debug_print(f"IF {condition} -> FALSE")
+                if self.debug_mode:
+                    self.debug_print(f"IF {condition} -> FALSE")
 
     def _execute_multi_statement(self, statements):
         """Execute colon-separated statements from IF/THEN/ELSE clause."""
@@ -2300,7 +2515,8 @@ class TRS80Simulator:
                 'next_line_number': next_ln,
             }
             self.scalar_variables[var] = start
-            self.debug_print(f"FOR {var}={start} TO {end} STEP {step}")
+            if self.debug_mode:
+                self.debug_print(f"FOR {var}={start} TO {end} STEP {step}")
 
     def _cmd_next(self, command):
         if self.for_loops:
@@ -2314,17 +2530,19 @@ class TRS80Simulator:
                     self._error_nf(next_var)
                     return
             else:
-                # Use innermost loop
-                var = list(self.for_loops.keys())[-1]
+                # Use innermost loop (avoid building a full list)
+                var = next(reversed(self.for_loops))
             loop = self.for_loops[var]
             loop['current'] += loop['step']
             self.scalar_variables[var] = loop['current']
             if (loop['step'] > 0 and loop['current'] <= loop['end']) or (loop['step'] < 0 and loop['current'] >= loop['end']):
-                self.debug_print(f"NEXT {var} -> {loop['current']} (repeat)")
+                if self.debug_mode:
+                    self.debug_print(f"NEXT {var} -> {loop['current']} (repeat)")
                 # Optimization 8: Use cached next_line_number from FOR time
                 return loop['next_line_number']
             else:
-                self.debug_print(f"NEXT {var} -> done")
+                if self.debug_mode:
+                    self.debug_print(f"NEXT {var} -> done")
                 self.for_loops.pop(var)
         else:
             self._error_nf('')
@@ -2342,7 +2560,8 @@ class TRS80Simulator:
         line_number = int(command[5:].strip())
         # Store return line index directly
         self.gosub_stack.append(self.current_line_index + 1)
-        self.debug_print(f"GOSUB {line_number} (depth {len(self.gosub_stack)})")
+        if self.debug_mode:
+            self.debug_print(f"GOSUB {line_number} (depth {len(self.gosub_stack)})")
         return line_number
 
     def _cmd_return(self, command):
@@ -2350,7 +2569,8 @@ class TRS80Simulator:
             return_index = self.gosub_stack.pop()
             # Optimization 2: Use pre-parsed _line_numbers
             if return_index < len(self._line_numbers):
-                self.debug_print(f"RETURN (depth {len(self.gosub_stack)})")
+                if self.debug_mode:
+                    self.debug_print(f"RETURN (depth {len(self.gosub_stack)})")
                 return self._line_numbers[return_index]
             return None
         else:
@@ -2411,6 +2631,16 @@ class TRS80Simulator:
     
     # ============================================================
     #  SECTION: Expression Evaluator
+    #  This is the heart of the interpreter.  evaluate_expression is
+    #  called from almost every command handler.  It has fast paths
+    #  for pure integers and simple variable lookups, then falls
+    #  through to _eval_nested which:
+    #    1. Builds a quote-map (bytearray) to protect string literals
+    #    2. Single-pass regex replaces BASIC keywords → Python ops
+    #    3. Resolves built-in functions via _builtin_functions table
+    #    4. Substitutes array references and scalar variables
+    #    5. Wraps comparisons for TRS-80 TRUE=-1 / FALSE=0 semantics
+    #    6. Calls Python eval() in a restricted namespace
     # ============================================================
     _PROTECTED_FUNCTIONS = frozenset([
         'SIN', 'COS', 'TAN', 'EXP', 'LOG', 'SQR', 'ABS', 'INT', 'RND',
@@ -2419,16 +2649,43 @@ class TRS80Simulator:
     ])
 
     def _build_quote_map(self, s):
-        """Return a list of booleans: True if position i is inside quotes"""
-        in_quotes = [False] * len(s)
-        inside = False
-        for i, ch in enumerate(s):
-            if ch == '"' and (i == 0 or s[i-1] != '\\'):
-                inside = not inside
+        """Return a bytearray: nonzero if position i is inside quotes"""
+        n = len(s)
+        in_quotes = bytearray(n)
+        inside = 0
+        for i in range(n):
+            if s[i] == '"' and (i == 0 or s[i-1] != '\\'):
+                inside ^= 1
             in_quotes[i] = inside
         return in_quotes
 
+    # Mapping from matched keyword text to Python equivalent
+    _KEYWORD_REPLACEMENTS = {
+        'MOD': '%',
+        'OR': ' or ',
+        'AND': ' and ',
+        'NOT': ' not ',
+        '<>': '!=',
+        '=': '==',
+        '^': ' ** ',
+    }
+
+    def _replace_keyword(self, match, quote_map):
+        """Replace a keyword match only if not inside quotes."""
+        if match.start() < len(quote_map) and quote_map[match.start()]:
+            return match.group(0)
+        text = match.group(0)
+        if text == 'RND':
+            return str(random.random())
+        return self._KEYWORD_REPLACEMENTS.get(text, text)
+
     def evaluate_expression(self, expr):
+        """Evaluate a BASIC expression and return its value.
+
+        Fast paths return immediately for integers, negative integers,
+        and bare variable names.  Everything else goes to _eval_nested
+        for full regex-based transformation and Python eval().
+        """
         self._last_eval_original = expr
         self._last_eval_substituted = expr
         self.replaced = False
@@ -2436,6 +2693,10 @@ class TRS80Simulator:
         # Fast path for simple numeric values
         expr_stripped = expr.strip()
         if expr_stripped.isdigit():
+            return int(expr_stripped)
+
+        # Fast path for negative integers like "-5"
+        if len(expr_stripped) > 1 and expr_stripped[0] == '-' and expr_stripped[1:].isdigit():
             return int(expr_stripped)
 
         # Fast path for simple variable references
@@ -2446,6 +2707,10 @@ class TRS80Simulator:
 
     # ============================================================
     #  TRS-80 Comparison & Logic Wrapping (TRUE=-1, FALSE=0)
+    #  TRS-80 BASIC comparisons return -1 for true and 0 for false.
+    #  _wrap_trs80_logic rewrites "A > B" into "_gt(A,B)" which is
+    #  a lambda in _eval_namespace that returns -1 or 0.
+    #  NOT is rewritten to _bnot() (bitwise complement ~int(x)).
     # ============================================================
     def _wrap_trs80_logic(self, expr):
         """Transform comparisons and NOT for TRS-80 semantics (-1/0).
@@ -2601,81 +2866,37 @@ class TRS80Simulator:
         return expr
 
     def _eval_nested(self, expr):
-        # Pre-compute quote map for this expression
+        """Full expression evaluation pipeline.
+
+        Transforms a BASIC expression string into a Python-evaluable string,
+        then calls eval().  Stages are documented in the file header.
+        """
+        # --- Stage 1: Build quote-map (bytearray, 0/1 per char) ---
+        # Used throughout to skip replacements inside string literals.
         quote_map = self._build_quote_map(expr)
 
         def is_in_quotes(pos):
             return pos < len(quote_map) and quote_map[pos]
 
-        # Replacement functions using quote_map
-        def replace_rnd(match):
-            return str(random.random()) if not is_in_quotes(match.start()) else match.group(0)
-
-        def replace_mod(match):
-            return '%' if not is_in_quotes(match.start()) else match.group(0)
-
-        def replace_or(match):
-            return ' or ' if not is_in_quotes(match.start()) else match.group(0)
-
-        def replace_and(match):
-            return ' and ' if not is_in_quotes(match.start()) else match.group(0)
-
-        def replace_equal(match):
-            return '==' if not is_in_quotes(match.start()) else match.group(0)
-
-        def replace_not_equal(match):
-            return '!=' if not is_in_quotes(match.start()) else match.group(0)
-
-        def replace_not(match):
-            return ' not ' if not is_in_quotes(match.start()) else match.group(0)
-
-        def replace_exp(match):
-            return ' ** ' if not is_in_quotes(match.start()) else match.group(0)
-
-        # Replace INKEY$ only once
-        inkey_match = self._regex_cache.get('inkey', re.compile(r'\bINKEY\$')).search(expr)
+        # --- Stage 2: INKEY$ replacement (at most once) ---
+        inkey_match = self._regex_cache['inkey'].search(expr)
         if inkey_match and not is_in_quotes(inkey_match.start()):
             inkey_result = self.inkey()
             expr = expr[:inkey_match.start()] + f"'{inkey_result}'" + expr[inkey_match.end():]
             self.replaced = True
             quote_map = self._build_quote_map(expr)
 
-        # Optimization 1: Skip quote-map rebuild when re.sub returns same object (no match)
-        # Python's re.sub returns the identical string object when no substitution occurs.
+        # --- Stage 3: Single-pass keyword translation ---
+        # One combined regex matches RND, MOD, OR, AND, NOT, =, <>, ^
+        # and _replace_keyword maps each to its Python equivalent,
+        # skipping matches inside quotes.
         prev = expr
-        expr = self._regex_cache['rnd_bare'].sub(replace_rnd, expr)
-        if expr is not prev:
-            quote_map = self._build_quote_map(expr)
-        prev = expr
-        expr = self._regex_cache['mod_op'].sub(replace_mod, expr)
-        if expr is not prev:
-            quote_map = self._build_quote_map(expr)
-        prev = expr
-        expr = self._regex_cache['or_op'].sub(replace_or, expr)
-        if expr is not prev:
-            quote_map = self._build_quote_map(expr)
-        prev = expr
-        expr = self._regex_cache['and_op'].sub(replace_and, expr)
-        if expr is not prev:
-            quote_map = self._build_quote_map(expr)
-        prev = expr
-        expr = self._regex_cache['not_op'].sub(replace_not, expr)
-        if expr is not prev:
-            quote_map = self._build_quote_map(expr)
-        prev = expr
-        expr = self._regex_cache['equal_op'].sub(replace_equal, expr)
-        if expr is not prev:
-            quote_map = self._build_quote_map(expr)
-        prev = expr
-        expr = self._regex_cache['not_equal_op'].sub(replace_not_equal, expr)
-        if expr is not prev:
-            quote_map = self._build_quote_map(expr)
-        prev = expr
-        expr = self._regex_cache['exp_op'].sub(replace_exp, expr)
+        expr = self._regex_cache['all_keywords'].sub(
+            lambda m: self._replace_keyword(m, quote_map), expr)
         if expr is not prev:
             quote_map = self._build_quote_map(expr)
 
-        # Handle nested functions using dispatch table
+        # --- Stage 4: Built-in function dispatch ---
         while True:
             func_match = self._regex_cache['func_match'].search(expr)
             if not func_match:
@@ -2700,7 +2921,10 @@ class TRS80Simulator:
             expr = expr.replace(func_match.group(), str(result), 1)
             quote_map = self._build_quote_map(expr)
 
-        # Optimization 6: Quick-skip array handling when no parentheses in expression
+        # --- Stage 5: Array reference substitution ---
+        # Matches "A(" patterns, recursively evaluates the index expression,
+        # and replaces with the array value.  Skipped entirely when there
+        # are no parentheses or no arrays defined.
         if '(' in expr and self.array_variables:
             for array_name in self.array_variables:
                 if isinstance(self.array_variables[array_name], list):
@@ -2725,8 +2949,8 @@ class TRS80Simulator:
                                     end_index = i
                                     break
                         if paren_count != 0:
-                            self.debug_print(f"Mismatched parentheses in array reference: {array_name}", 'error')
-                            return None
+                            self._error_sn(f"Mismatched parentheses in array reference: {array_name}")
+                            raise ValueError(f"Mismatched parentheses in array reference: {array_name}")
 
                         index_expr = expr[start_index:end_index]
                         index = int(self._eval_nested(index_expr))
@@ -2736,14 +2960,17 @@ class TRS80Simulator:
                                 replacement = f"'{replacement}'"
                             expr = expr[:match.start()] + str(replacement) + expr[end_index + 1:]
                         else:
-                            self.debug_print(f"Array index out of bounds: {array_name}[{index}]", 'error')
-                            return None
+                            self._error_bs(array_name, index)
+                            raise IndexError(f"Array index out of bounds: {array_name}[{index}]")
                         start = match.start() + len(str(replacement))
 
-        # Variable substitution with early-exit optimization
+        # --- Stage 6: Scalar variable substitution ---
+        # Split on quoted strings so replacements don't touch literals.
+        # Variables are sorted longest-first to prevent "A" clobbering "AB".
+        # Cached compiled regex per variable name avoids repeated re.compile.
         parts = self._regex_cache['string_split'].split(expr)
 
-        # Only do variable substitution if there are alphabetic chars (skip pure numeric exprs)
+        # Skip entirely for pure-numeric expressions (no alpha chars)
         has_alpha = any(c.isalpha() for c in expr)
         if has_alpha and self.scalar_variables:
             # Optimization 5: Cache sorted_vars, only re-sort when variable count changes
@@ -2765,12 +2992,16 @@ class TRS80Simulator:
                     value = self.scalar_variables[var]
                     new_parts = []
                     last_end = 0
-                    if var.upper() in self._PROTECTED_FUNCTIONS:
-                        pattern = rf'\b{re.escape(var)}\b(?!\()'
-                    else:
-                        pattern = re.escape(var) if var.endswith('$') else r'\b' + re.escape(var) + r'\b'
+                    # Use cached compiled regex per variable name
+                    if var not in self._var_regex_cache:
+                        if var.upper() in self._PROTECTED_FUNCTIONS:
+                            pattern = rf'\b{re.escape(var)}\b(?!\()'
+                        else:
+                            pattern = re.escape(var) if var.endswith('$') else r'\b' + re.escape(var) + r'\b'
+                        self._var_regex_cache[var] = re.compile(pattern)
+                    var_re = self._var_regex_cache[var]
 
-                    for match in re.finditer(pattern, parts[i]):
+                    for match in var_re.finditer(parts[i]):
                         s, e = match.span()
                         if not (s < len(part_quote_map) and part_quote_map[s]):
                             new_parts.append(parts[i][last_end:s])
@@ -2794,21 +3025,32 @@ class TRS80Simulator:
         expr = ''.join(parts)
         self._last_eval_substituted = expr
 
-        # Wrap comparison operators and NOT for TRS-80 semantics (-1/0)
+        # --- Stage 7: Comparison wrapping for TRS-80 semantics ---
+        # Rewrites "A > B" → "_gt(A,B)" and "not X" → "_bnot(X)"
+        # so eval() produces -1 (true) or 0 (false).
         expr = self._wrap_trs80_logic(expr)
         self._last_eval_substituted = expr
 
+        # --- Stage 8: Python eval() in restricted namespace ---
+        # _eval_globals has __builtins__=None for safety.
+        # _eval_namespace provides int/float/str/chr/ord plus the
+        # comparison wrappers (_gt, _lt, _ge, _le, _eq, _ne, _bnot).
         try:
-            # Optimization 3: Use pre-built eval namespace dicts
             result = eval(expr, self._eval_globals, self._eval_namespace)
             return result
         except Exception as e:
             if self.debug_mode:
                 self.debug_print(f"Evaluation failed: {e}", 'error')
+            # Fall back: treat as a string literal (unquote)
             return expr.strip("'\"")
 
     # ============================================================
     #  SECTION: Built-in Functions (dispatch table)
+    #  _builtin_functions maps function names to handler callables.
+    #  Each handler receives (inner_value, inner_expr) where
+    #  inner_value is the already-evaluated argument and inner_expr
+    #  is the raw text (needed by multi-argument functions like
+    #  LEFT$, MID$, INSTR which split on commas internally).
     # ============================================================
     def _init_builtin_functions(self):
         """Initialize the built-in function dispatch table"""
@@ -2927,6 +3169,10 @@ class TRS80Simulator:
 
     # ============================================================
     #  SECTION: Memory (POKE/PEEK)
+    #  TRS-80 screen memory: addresses 15360-16383 map to the
+    #  64x16 text grid.  PEEK(14400) returns the last key pressed
+    #  (keyboard buffer) — the primary way games poll input.
+    #  INKEY$ is the string-returning equivalent.
     # ============================================================
     def poke(self, address, value):
         """
@@ -2942,9 +3188,9 @@ class TRS80Simulator:
             self.screen_content[row][col] = chr(value)
             
             # Update the screen display
-            x = col * self.pixel_size * 2
-            y = row * self.pixel_size * 3
-            self.screen.create_text(x, y, text=chr(value), font=("Courier", self.base_font_size * self.scale_factor), fill="lime", anchor="nw")
+            x = col * self._char_w
+            y = row * self._char_h
+            self.screen.create_text(x, y, text=chr(value), font=self._screen_font, fill="lime", anchor="nw")
             
             self.debug_print(f"POKE: Address={address}, Value={value}, Row={row}, Col={col}")
         else:
@@ -2987,6 +3233,11 @@ class TRS80Simulator:
 
     # ============================================================
     #  SECTION: Graphics (SET/RESET/POINT)
+    #  The 128x48 pixel grid is stored in self.pixel_matrix.
+    #  SET/RESET queue operations in _pending_graphics (batched
+    #  every 20 ops or at GUI-update boundaries).  _flush_graphics
+    #  draws/erases pixel rectangles on the Canvas.  self._active_pixels
+    #  tracks which (x,y) are lit for efficient redraw/scroll.
     # ============================================================
     def set_pixel(self, x, y):
         if 0 <= x < 128 and 0 <= y < 48:
@@ -3043,6 +3294,9 @@ class TRS80Simulator:
 
     # ============================================================
     #  SECTION: File I/O (Tape/Save/Load)
+    #  Tape I/O (PRINT#-1 / INPUT#-1) reads/writes .dat files
+    #  one line at a time.  SAVE/LOAD use .bas text files.
+    #  Programs are always sorted by line number on save/load.
     # ============================================================
     def create_tape_file(self):
         self.debug_print("Creating tape .dat file")
@@ -3118,7 +3372,11 @@ class TRS80Simulator:
         self.save_button.config(state=tk.NORMAL)
 
     # ============================================================
-    #  SECTION: Help Text
+    #  SECTION: Help Text & Scale Toggle
+    #  Help content is shown in non-modal Toplevel windows.
+    #  toggle_scale switches between 1x and 2x display size
+    #  (disabled on Raspberry Pi).  resize_components updates
+    #  cached pixel_size, _char_w, _char_h, _screen_font.
     # ============================================================
     def show_specific_help(self, help_index):
         """Show a specific help screen in a non-modal window"""
@@ -3186,16 +3444,25 @@ class TRS80Simulator:
     def resize_components(self):
         # Resize the screen
         self.pixel_size = PIXEL_SIZE * self.scale_factor
+        self._char_w = self.pixel_size * 2
+        self._char_h = self.pixel_size * 3
+        self._screen_font = ("Courier", self.base_font_size * self.scale_factor)
         self.screen.config(width=INITIAL_WIDTH * self.scale_factor, height=INITIAL_HEIGHT * self.scale_factor)
-        
+
         # Resize the font for input area
         self.input_area.config(font=("Courier", self.input_font_size* self.scale_factor))
-        
+
         # Redraw the screen content
         self.redraw_screen()
 
     # ============================================================
     #  SECTION: Immediate Mode
+    #  When no program is running, the green screen shows a ">"
+    #  prompt.  Typed characters accumulate in command_buffer.
+    #  On Enter, process_immediate_command either:
+    #    - Stores a numbered line in stored_program
+    #    - Dispatches a command (RUN, LIST, NEW, CLEAR, CLS, etc.)
+    #    - Falls through to execute_command for direct execution
     # ============================================================
     def _ensure_immediate_prompt(self, show_ready_if_empty=False):
         """Keep exactly one immediate-mode prompt visible on the current line."""
@@ -3243,20 +3510,20 @@ class TRS80Simulator:
                 # Handle backspace on screen
                 if self.cursor_col > 1 or (self.cursor_col == 1 and self.screen_content[self.cursor_row][0] != '>'):  # Don't delete the prompt
                     self.cursor_col -= 1
-                    x = self.cursor_col * self.pixel_size * 2
-                    y = self.cursor_row * self.pixel_size * 3
-                    self.screen.create_rectangle(x, y, x + self.pixel_size * 2, y + self.pixel_size * 3, fill="black", outline="black")
+                    x = self.cursor_col * self._char_w
+                    y = self.cursor_row * self._char_h
+                    self.screen.create_rectangle(x, y, x + self._char_w, y + self._char_h, fill="black", outline="black")
                     self.screen_content[self.cursor_row][self.cursor_col] = ' '
                     self.update_cursor_display()
         elif event.char and event.char.isprintable():
             # Add character to buffer and display
             char = event.char.upper()
             self.command_buffer += char
-            
+
             # Display character on screen
-            x = self.cursor_col * self.pixel_size * 2
-            y = self.cursor_row * self.pixel_size * 3
-            self.screen.create_text(x, y, text=char, font=("Courier", self.base_font_size * self.scale_factor), fill="lime", anchor="nw")
+            x = self.cursor_col * self._char_w
+            y = self.cursor_row * self._char_h
+            self.screen.create_text(x, y, text=char, font=self._screen_font, fill="lime", anchor="nw")
             self.screen_content[self.cursor_row][self.cursor_col] = char
             self.cursor_col += 1
             

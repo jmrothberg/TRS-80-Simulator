@@ -1,10 +1,12 @@
-
-torch
 anthropic
+torch
 transformers
 pyinstaller
+llama-cpp-python
+accelerate
+einops
+torchvision
 accelerate
 flash-attention
-einops
 torchvisionpi
 requests
