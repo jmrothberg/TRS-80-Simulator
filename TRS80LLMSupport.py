@@ -7,8 +7,7 @@
 import tkinter as tk
 from tkinter import ttk, scrolledtext, filedialog, messagebox
 import anthropic
-import torch
-from transformers import AutoModelForCausalLM, AutoTokenizer, TextIteratorStreamer
+# torch and transformers are lazy-imported when needed (see load_model / MyStreamer)
 import requests
 import json
 import os
@@ -16,25 +15,29 @@ import platform
 import re
 import threading
 
-class MyStreamer(TextIteratorStreamer):
-    def __init__(self, tokenizer, skip_prompt: bool = False, **decode_kwargs):
-        super().__init__(tokenizer, skip_prompt=skip_prompt, **decode_kwargs)
-        self.text_area = None
-        self.internal_text = ""
-        self.master = None  # Add master reference for thread-safe updates
+def _make_streamer(tokenizer, skip_special_tokens=True, skip_prompt=True):
+    """Factory that lazy-imports transformers and builds a MyStreamer instance."""
+    from transformers import TextIteratorStreamer
 
-    def on_finalized_text(self, text: str, stream_end: bool = False):
-        self.internal_text += text
-        # Use thread-safe GUI updates instead of direct updates
-        if self.text_area and self.master:
-            self.master.after(0, lambda: self._safe_update_gui(text))
+    class MyStreamer(TextIteratorStreamer):
+        def __init__(self, tok, skip_prompt_: bool = False, **decode_kwargs):
+            super().__init__(tok, skip_prompt=skip_prompt_, **decode_kwargs)
+            self.text_area = None
+            self.internal_text = ""
+            self.master = None
 
-    def _safe_update_gui(self, text):
-        """Thread-safe GUI update method"""
-        if self.text_area:
-            self.text_area.insert(tk.END, text)
-            self.text_area.see(tk.END)
-            self.text_area.update_idletasks()  # Use update_idletasks instead of update
+        def on_finalized_text(self, text: str, stream_end: bool = False):
+            self.internal_text += text
+            if self.text_area and self.master:
+                self.master.after(0, lambda: self._safe_update_gui(text))
+
+        def _safe_update_gui(self, text):
+            if self.text_area:
+                self.text_area.insert(tk.END, text)
+                self.text_area.see(tk.END)
+                self.text_area.update_idletasks()
+
+    return MyStreamer(tokenizer, skip_prompt_=skip_prompt, skip_special_tokens=skip_special_tokens)
 
 class TRS80LLMSupport:
     def __init__(self, master, simulator):
@@ -182,16 +185,18 @@ class TRS80LLMSupport:
         model_type = self.model_type_var.get()
 
         if model_type == "transformer":
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
             model_path = os.path.join(self.transformer_dir, model_name)
             self.model = AutoModelForCausalLM.from_pretrained(
-                model_path, 
-                device_map="auto", 
+                model_path,
+                device_map="auto",
                 torch_dtype=torch.float16,
-                trust_remote_code=True  # Add this line
+                trust_remote_code=True
             )
             self.tokenizer = AutoTokenizer.from_pretrained(
                 model_path,
-                trust_remote_code=True  # Add this line
+                trust_remote_code=True
             )
         elif model_type == "ollama":
             # For Ollama, we don't need to load the model in memory
@@ -427,7 +432,7 @@ class TRS80LLMSupport:
             self.master.after(0, lambda: messagebox.showerror("Error", err_msg))
 
     def my_streamer(self, text_area, tokenizer):
-        return MyStreamer(tokenizer, skip_special_tokens=True, skip_prompt=True)
+        return _make_streamer(tokenizer, skip_special_tokens=True, skip_prompt=True)
 
     def send_to_transformer(self, system_prompt, prompt):
         try:

@@ -262,6 +262,43 @@ Run with: type `LOAD` on the green screen, select a `.bas` file, then type `RUN`
 - **Graphics seem too small:** Use the `2X` button (not available on Raspberry Pi).
 - **Screen seems frozen:** Click the green screen or press `Ctrl+R`.
 
+## Building a Standalone Executable (PyInstaller)
+
+```bash
+pyinstaller --onefile --console \
+    --exclude-module torch --exclude-module transformers \
+    --exclude-module tensorflow --exclude-module keras \
+    --exclude-module numpy --exclude-module scipy \
+    --exclude-module pandas --exclude-module matplotlib \
+    --exclude-module sklearn --exclude-module scikit-learn \
+    --exclude-module onnxruntime --exclude-module chromadb \
+    --exclude-module llama_cpp --exclude-module huggingface_hub \
+    --exclude-module tokenizers --exclude-module sentencepiece \
+    --exclude-module safetensors --exclude-module accelerate \
+    --exclude-module tqdm --exclude-module sympy \
+    --exclude-module PIL --exclude-module cv2 \
+    --name TRS80_March_22 \
+    TRS80_March_22_26.py
+```
+
+**macOS Gatekeeper fix** — required after every build:
+```bash
+xattr -cr dist/
+```
+Without this, macOS will block the binary from running.
+
+**Finder double-click wrapper** — create `dist/TRS80_March_22.command`:
+```bash
+#!/bin/bash
+cd "$(dirname "$0")"
+./TRS80_March_22
+```
+Then `chmod +x dist/TRS80_March_22.command`.  Double-click the `.command` file in Finder to launch.
+
+> **Note:** The LLM companion (`TRS80LLMSupport.py`) is lazy-imported at runtime, so its heavy dependencies (torch, transformers, etc.) are excluded from the build.  The simulator itself runs without them.  If you need LLM support in the packaged build, remove the corresponding `--exclude-module` flags and expect a ~500 MB binary.
+
+---
+
 ## License
 
 This project is licensed under the MIT License.  See `LICENSE`.

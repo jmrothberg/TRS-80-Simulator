@@ -103,7 +103,9 @@ import os
 import math
 import time
 import platform
-from TRS80LLMSupport import TRS80LLMSupport
+# TRS80LLMSupport is imported lazily in open_llm_support() to avoid
+# pulling in torch/transformers at startup (faster launch, smaller binary).
+TRS80LLMSupport = None
 PIXEL_SIZE = 6  # Reduced from 6 to 4 for smaller screen
 INITIAL_WIDTH = 768  # 128 pixels * 6 = 774 to accommodate coordinates 1-128
 INITIAL_HEIGHT = 288  # Reduced from 288 to 192 for 7" screen
@@ -476,7 +478,7 @@ class TRS80Simulator:
         self._regex_cache['func_match'] = re.compile(r'(INT|SIN|COS|TAN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(((?:[^()]+|\([^()]*\))*)\)')
         self._regex_cache['quotes'] = re.compile(r'(?<!\\)"')
         self._regex_cache['quotes_single'] = re.compile(r"(?<!\\)'")
-        self._regex_cache['string_split'] = re.compile(r'("(?:[^"\\]|\\.)*")')
+        self._regex_cache['string_split'] = re.compile(r"""("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')""")
         # Cached patterns for expression evaluation (Part 3A)
         self._regex_cache['rnd_bare'] = re.compile(r'\bRND\b(?!\()')
         self._regex_cache['mod_op'] = re.compile(r'\bMOD\b')
@@ -515,6 +517,9 @@ class TRS80Simulator:
                 self.llm_support.llm_window.withdraw()
 
     def open_llm_support(self):
+        global TRS80LLMSupport
+        if TRS80LLMSupport is None:
+            from TRS80LLMSupport import TRS80LLMSupport
         if self.llm_support is None or not self.llm_support.llm_window.winfo_exists():
             self.llm_support = TRS80LLMSupport(self.master, self)
             self.llm_support.llm_window.protocol("WM_DELETE_WINDOW", self.on_llm_window_close)
@@ -2649,14 +2654,21 @@ class TRS80Simulator:
     ])
 
     def _build_quote_map(self, s):
-        """Return a bytearray: nonzero if position i is inside quotes"""
+        """Return a bytearray: nonzero if position i is inside quotes.
+        Tracks both double and single quotes (single only outside double,
+        double only outside single) so that internally-generated single-
+        quoted strings (INKEY$, variable substitution) are also protected."""
         n = len(s)
         in_quotes = bytearray(n)
-        inside = 0
+        in_double = 0
+        in_single = 0
         for i in range(n):
-            if s[i] == '"' and (i == 0 or s[i-1] != '\\'):
-                inside ^= 1
-            in_quotes[i] = inside
+            ch = s[i]
+            if ch == '"' and not in_single:
+                in_double ^= 1
+            elif ch == "'" and not in_double:
+                in_single ^= 1
+            in_quotes[i] = in_double | in_single
         return in_quotes
 
     # Mapping from matched keyword text to Python equivalent
