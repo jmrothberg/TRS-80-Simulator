@@ -874,6 +874,7 @@ _initCommandHandlers() {
         'RESTORE': ()  => { this.dataPointer = 0; },
         'STOP':    ()  => this._cmdStop(),
         'END':     ()  => this._cmdEnd(),
+        'LOAD':    (c) => this._cmdLoad(c),
     };
 }
 
@@ -1280,6 +1281,16 @@ _cmdEnd() {
     this._flushGraphics();
 }
 
+// LOAD called from within a running BASIC program:
+// stops the current program, opens the file picker, loads the new .bas, and auto-RUNs it.
+_cmdLoad(command) {
+    this.programRunning = false;
+    this._setStopBtn(false);
+    this._flushGraphics();
+    this._autoRunAfterLoad = true;      // signal _handleFileLoad to RUN when done
+    this._triggerLoad();
+}
+
 // -- Tape I/O (in-memory) --
 _cmdInputTape(command) {
     const varName = command.split(',')[1].trim();
@@ -1612,7 +1623,7 @@ _initBuiltinFunctions() {
         'POINT':   (v, ie) => this._funcPoint(ie),
         'LEN':     (v) => String(v).replace(/^['"]|['"]$/g, '').length,
         'STR$':    (v) => this._funcStr(v),
-        'CHR$':    (v) => `'${String.fromCharCode(Math.trunc(Number(v)))}'`,
+        'CHR$':    (v) => "'" + String.fromCharCode(Math.trunc(Number(v))).replace(/'/g, "\\'") + "'",
         'STRING$': (v, ie) => this._funcString(ie),
         'LEFT$':   (v, ie) => this._funcLeft(ie),
         'RIGHT$':  (v, ie) => this._funcRight(ie),
@@ -1631,7 +1642,8 @@ _funcStr(v) {
     const num = Number(v);
     let s = (num === Math.trunc(num)) ? String(Math.trunc(num)) : String(num);
     if (num >= 0) s = ' ' + s;
-    return `'${s}'`;
+    // Escape any apostrophes so eval() doesn't break (mirrors Python .replace("'","\'"))
+    return "'" + s.replace(/'/g, "\\'") + "'";
 }
 
 _funcPoint(innerExpr) {
@@ -1649,21 +1661,21 @@ _funcString(innerExpr) {
     let char = this._evalNested(parts[1].trim());
     if (typeof char === 'number') char = String.fromCharCode(char);
     else char = String(char).replace(/^['"]|['"]$/g, '')[0] || '';
-    return `'${char.repeat(count)}'`;
+    return "'" + char.repeat(count).replace(/'/g, "\\'") + "'";
 }
 
 _funcLeft(innerExpr) {
     const parts = innerExpr.split(',');
     const str = String(this._evalNested(parts[0].trim())).replace(/^['"]|['"]$/g, '');
     const len = Math.trunc(this._evalNested(parts[1].trim()));
-    return `'${str.substring(0, len)}'`;
+    return "'" + str.substring(0, len).replace(/'/g, "\\'") + "'";
 }
 
 _funcRight(innerExpr) {
     const parts = innerExpr.split(',');
     const str = String(this._evalNested(parts[0].trim())).replace(/^['"]|['"]$/g, '');
     const len = Math.trunc(this._evalNested(parts[1].trim()));
-    return `'${str.slice(-len)}'`;
+    return "'" + str.slice(-len).replace(/'/g, "\\'") + "'";
 }
 
 _funcMid(innerExpr) {
@@ -1672,9 +1684,9 @@ _funcMid(innerExpr) {
     const start = Math.trunc(this._evalNested(parts[1].trim())) - 1;
     if (parts.length > 2) {
         const len = Math.trunc(this._evalNested(parts[2].trim()));
-        return `'${str.substring(start, start + len)}'`;
+        return "'" + str.substring(start, start + len).replace(/'/g, "\\'") + "'";
     }
-    return `'${str.substring(start)}'`;
+    return "'" + str.substring(start).replace(/'/g, "\\'") + "'";
 }
 
 _funcInstr(innerExpr) {
@@ -1790,6 +1802,8 @@ _triggerLoad() {
 _handleFileLoad(event) {
     const file = event.target.files[0];
     if (!file) return;
+    const autoRun = this._autoRunAfterLoad;
+    this._autoRunAfterLoad = false;
     const reader = new FileReader();
     reader.onload = (e) => {
         const content = e.target.result;
@@ -1797,6 +1811,12 @@ _handleFileLoad(event) {
         this.inputArea.value = lines.join('\n');
         this.storedProgram = lines;
         this.printToScreen(`LOADED: ${file.name}`);
+        // If LOAD was called from within a program, auto-RUN the loaded file
+        if (autoRun) {
+            setTimeout(() => this.runProgram(), 50);
+        } else {
+            this.enableImmediateMode();
+        }
     };
     reader.readAsText(file);
     event.target.value = '';
