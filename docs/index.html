@@ -1,0 +1,1995 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>JMR's TRS-80 Simulator</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { background: #2a2a2a; color: #ccc; font-family: Arial, sans-serif; display: flex; flex-direction: column; align-items: center; min-height: 100vh; padding: 10px; }
+#container { max-width: 800px; width: 100%; }
+h1 { text-align: center; color: #7f7; font-size: 18px; margin-bottom: 8px; font-family: 'Courier New', monospace; }
+#screenFrame { background: #333; padding: 8px; border-radius: 6px; border: 2px solid #555; margin-bottom: 8px; display: flex; justify-content: center; }
+canvas { display: block; cursor: text; image-rendering: pixelated; }
+#inputArea { width: 100%; height: 110px; background: #1a1a1a; color: #0f0; border: 1px solid #555; font-family: 'Courier New', monospace; font-size: 13px; padding: 4px; resize: vertical; margin-bottom: 6px; }
+#buttonBar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+#buttonBar button { background: #444; color: #ddd; border: 1px solid #666; padding: 4px 10px; font-size: 12px; cursor: pointer; border-radius: 3px; }
+#buttonBar button:hover { background: #555; }
+#buttonBar button:disabled { opacity: 0.4; cursor: default; }
+#buttonBar button:disabled:hover { background: #444; }
+#debugPanel { background: #1a1a1a; border: 1px solid #555; border-radius: 4px; padding: 6px; margin-top: 6px; }
+#debugPanel h3 { color: #aaa; font-size: 13px; margin-bottom: 4px; cursor: pointer; }
+#debugText { width: 100%; height: 150px; background: #111; color: #aaa; border: 1px solid #444; font-family: 'Courier New', monospace; font-size: 11px; padding: 4px; resize: vertical; }
+#debugBar { display: flex; gap: 4px; margin-bottom: 4px; }
+#debugBar button { background: #383838; color: #bbb; border: 1px solid #555; padding: 2px 8px; font-size: 11px; cursor: pointer; border-radius: 2px; }
+#fileInput { display: none; }
+</style>
+</head>
+<body>
+<div id="container">
+<h1>JMR's TRS-80 Simulator</h1>
+<div id="screenFrame">
+<canvas id="screen" width="768" height="288" tabindex="0"></canvas>
+</div>
+<textarea id="inputArea" spellcheck="false" placeholder="Enter BASIC program here..."></textarea>
+<div id="buttonBar">
+<button id="btnRun">RUN</button>
+<button id="btnClear">CLEAR</button>
+<button id="btnStop" disabled>STOP</button>
+<button id="btnStep" disabled>STEP</button>
+<button id="btnList">LIST</button>
+<button id="btnNew">NEW</button>
+<button id="btnSave">SAVE</button>
+<button id="btnLoad">LOAD</button>
+<button id="btnCopy">Copy</button>
+<button id="btnDebug">Debug: ON</button>
+</div>
+<div id="debugPanel" style="display:none">
+<div id="debugBar">
+<button id="btnDebugClear">Clear</button>
+<button id="btnDebugList">List Preprocessed</button>
+</div>
+<textarea id="debugText" readonly></textarea>
+</div>
+</div>
+<input type="file" id="fileInput" accept=".bas,.txt">
+
+<script>
+// ===================================================================
+//  TRS-80 Model I Level II BASIC Simulator — Web Edition
+//  Ported from TRS80_March_22_26.py by Jonathan Rothberg (JMR)
+// ===================================================================
+
+// -- Comparison wrappers for TRS-80 semantics (TRUE = -1, FALSE = 0) --
+function _gt(a, b) { return a > b ? -1 : 0; }
+function _lt(a, b) { return a < b ? -1 : 0; }
+function _ge(a, b) { return a >= b ? -1 : 0; }
+function _le(a, b) { return a <= b ? -1 : 0; }
+function _eq(a, b) { return a == b ? -1 : 0; }
+function _ne(a, b) { return a != b ? -1 : 0; }
+function _bnot(a)   { return ~Math.trunc(a); }
+
+const PIXEL_SIZE = 6;
+const SCREEN_W = 768;   // 128 * 6
+const SCREEN_H = 288;   // 48  * 6
+const COLS = 64;
+const ROWS = 16;
+
+const KEYWORD_REPLACEMENTS = {
+    'MOD': ' % ',
+    'OR':  ' | ',
+    'AND': ' & ',
+    'NOT': ' not ',
+    '<>':  '!=',
+    '=':   '==',
+    '^':   '**',
+};
+
+// ===================================================================
+//  TRS80Simulator class
+// ===================================================================
+class TRS80Simulator {
+
+// ------------------------------------------------------------------
+//  Constructor — mirrors Python __init__
+// ------------------------------------------------------------------
+constructor() {
+    this.canvas = document.getElementById('screen');
+    this.ctx    = this.canvas.getContext('2d');
+    this.inputArea  = document.getElementById('inputArea');
+    this.debugText  = document.getElementById('debugText');
+    this.debugPanel = document.getElementById('debugPanel');
+
+    this.pixelSize = PIXEL_SIZE;
+    this.charW = PIXEL_SIZE * 2;   // 12
+    this.charH = PIXEL_SIZE * 3;   // 18
+    this.screenFont = "16px 'Courier New', monospace";
+
+    // Screen state
+    this.screenContent = [];
+    this.pixelMatrix   = [];
+    this.activePixels  = new Set();
+    this.cursorRow = 0;
+    this.cursorCol = 0;
+    this.cursorVisible = true;
+    this._lastCursorRow = undefined;
+    this._lastCursorCol = undefined;
+
+    // Interpreter state
+    this.scalarVariables = {};
+    this.arrayVariables  = {};
+    this.forLoops        = {};
+    this.gosubStack      = [];
+    this.dataValues      = [];
+    this.dataPointer     = 0;
+    this.currentLineIndex = 0;
+    this.programRunning  = false;
+    this.programPaused   = false;
+    this.waitingForInput = false;
+    this.inputVariable   = null;
+    this.lastKeyPressed  = null;
+    this.lastKeyTime     = 0;
+    this.keyCheckInterval = 0.05;
+    this.stepping        = false;
+    this.immediateMode   = true;
+    this.commandBuffer   = '';
+    this.storedProgram   = [];
+    this.sortedProgram   = [];
+    this.originalProgram = [];
+    this.debugMode       = false;
+
+    this._lineNumbers   = [];
+    this._lineCommands  = [];
+    this._lineCmdWords  = [];
+    this._usesInkey     = false;
+
+    this._sortedVarsCache = [];
+    this._lastVarCount    = 0;
+    this._arrayPatterns   = {};
+    this._varRegexCache   = {};
+
+    this._pendingGraphics = [];
+    this._lastDebugCommand    = '';
+    this._lastEvalOriginal    = '';
+    this._lastEvalSubstituted = '';
+
+    this.tapeData    = [];
+    this.tapePointer = 0;
+
+    // Input handling state
+    this.inputStartRow = 0;
+    this.inputStartCol = 0;
+
+    this.replaced = false;
+
+    // Compile regex patterns
+    this._compileRegexPatterns();
+    this._initCommandHandlers();
+    this._initBuiltinFunctions();
+
+    // Init screen arrays
+    this._resetScreenArrays();
+    this.clearScreen();
+
+    // Wire up buttons
+    this._wireButtons();
+
+    // Keyboard handling on canvas
+    this.canvas.addEventListener('keydown', (e) => this._handleKeyDown(e));
+    this.canvas.addEventListener('click', () => this.canvas.focus());
+
+    // Auto-capitalize input area
+    this.inputArea.addEventListener('input', () => {
+        const pos = this.inputArea.selectionStart;
+        this.inputArea.value = this.inputArea.value.toUpperCase();
+        this.inputArea.selectionStart = this.inputArea.selectionEnd = pos;
+    });
+
+    // Start cursor blink
+    this._cursorTimer = setInterval(() => this._blinkCursor(), 500);
+
+    // Enable immediate mode
+    this.enableImmediateMode();
+}
+
+// ------------------------------------------------------------------
+//  Regex compilation — mirrors _compile_regex_patterns
+// ------------------------------------------------------------------
+_compileRegexPatterns() {
+    this._re = {};
+    this._re.arrayMatch   = /^(\w+\$?)\((.+)\)$/;
+    this._re.printAt      = /^PRINT@\s*([^,;]+)\s*,?\s*(.*)/;
+    this._re.inputPrompt  = /^INPUT\s*"(.*)"\s*;\s*(\w+\$?(?:\(.*?\))?)$/;
+    this._re.ifThen       = /^IF\s+(.*?)\s+THEN\s+(.*?)(\s+ELSE\s+(.*))?$/;
+    this._re.forLoop      = /^FOR\s+(\w+)\s*=\s*(.+?)\s+TO\s+(.+?)(\s+STEP\s+(.+))?$/;
+    this._re.onGoto       = /^ON\s+(.*?)\s+GOTO\s+(.*)/;
+    this._re.dim          = /^DIM\s+(\w+\$?)\((.+)\)$/;
+    this._re.poke         = /^POKE\s+(.+?)\s*,\s*(.+)/;
+    this._re.tab          = /TAB\((\d+)\)/;
+    this._re.funcMatch    = /(INT|SIN|COS|TAN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(((?:[^()]+|\([^()]*\))*)\)/;
+    this._re.stringSplit  = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/;
+    this._re.inkey        = /\bINKEY\$/;
+    this._re.allKeywords  = /\bRND\b(?!\()|\bMOD\b|\bOR\b|\bAND\b|\bNOT\b|<>|(?<![=<>])=(?!=)|\^/g;
+}
+
+_resetScreenArrays() {
+    this.screenContent = Array.from({length: ROWS}, () => Array(COLS).fill(' '));
+    this.pixelMatrix   = Array.from({length: 48}, () => Array(128).fill(0));
+    this.activePixels  = new Set();
+}
+
+// ------------------------------------------------------------------
+//  Button wiring
+// ------------------------------------------------------------------
+_wireButtons() {
+    document.getElementById('btnRun').onclick   = () => this.runProgram();
+    document.getElementById('btnClear').onclick = () => this._clearVariablesBtn();
+    document.getElementById('btnStop').onclick  = () => this.stopProgram();
+    document.getElementById('btnStep').onclick  = () => this.stepProgram();
+    document.getElementById('btnList').onclick  = () => this.listProgram();
+    document.getElementById('btnNew').onclick   = () => this._newBtn();
+    document.getElementById('btnSave').onclick  = () => this.saveProgram();
+    document.getElementById('btnLoad').onclick  = () => this._triggerLoad();
+    document.getElementById('btnCopy').onclick  = () => this.copyScreen();
+    document.getElementById('btnDebug').onclick = () => this.toggleDebug();
+    document.getElementById('btnDebugClear').onclick = () => { this.debugText.value = ''; };
+    document.getElementById('btnDebugList').onclick  = () => this._listPreprocessed();
+
+    document.getElementById('fileInput').addEventListener('change', (e) => this._handleFileLoad(e));
+}
+
+// ------------------------------------------------------------------
+//  Screen Rendering
+// ------------------------------------------------------------------
+clearScreen() {
+    this._flushGraphics();
+    const ctx = this.ctx;
+    ctx.fillStyle = 'black';
+    ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+    this.screenContent = Array.from({length: ROWS}, () => Array(COLS).fill(' '));
+    this.pixelMatrix   = Array.from({length: 48}, () => Array(128).fill(0));
+    this.activePixels  = new Set();
+    this.cursorRow = 0;
+    this.cursorCol = 0;
+    this._pendingGraphics = [];
+    this.updateCursorDisplay();
+}
+
+drawChar(row, col, char) {
+    const x = col * this.charW;
+    const y = row * this.charH;
+    this.ctx.fillStyle = 'black';
+    this.ctx.fillRect(x, y, this.charW, this.charH);
+    if (char && char !== ' ') {
+        this.ctx.fillStyle = '#33ff33';
+        this.ctx.font = this.screenFont;
+        this.ctx.textBaseline = 'top';
+        this.ctx.fillText(char, x + 1, y + 1);
+    }
+}
+
+printToScreen(text, end = '\n') {
+    const output = String(text) + end;
+    const charW = this.charW;
+    const charH = this.charH;
+    const ctx = this.ctx;
+
+    for (const char of output) {
+        if (char === '\n' || this.cursorCol >= COLS) {
+            this.cursorRow++;
+            this.cursorCol = 0;
+            if (this.cursorRow >= ROWS) {
+                this._scrollScreenUp();
+            }
+            if (char === '\n') continue;
+        }
+        this.screenContent[this.cursorRow][this.cursorCol] = char;
+        const x = this.cursorCol * charW;
+        const y = this.cursorRow * charH;
+        ctx.fillStyle = 'black';
+        ctx.fillRect(x, y, charW, charH);
+        if (char !== ' ') {
+            ctx.fillStyle = '#33ff33';
+            ctx.font = this.screenFont;
+            ctx.textBaseline = 'top';
+            ctx.fillText(char, x + 1, y + 1);
+        }
+        this.cursorCol++;
+    }
+    this.updateCursorDisplay();
+}
+
+redrawScreen() {
+    const ctx = this.ctx;
+    ctx.fillStyle = 'black';
+    ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+    const ps = this.pixelSize;
+
+    ctx.fillStyle = '#33ff33';
+    for (const key of this.activePixels) {
+        const [x, y] = key.split(',').map(Number);
+        ctx.fillRect(x * ps, y * ps, ps, ps);
+    }
+
+    ctx.font = this.screenFont;
+    ctx.textBaseline = 'top';
+    for (let r = 0; r < ROWS; r++) {
+        for (let c = 0; c < COLS; c++) {
+            const ch = this.screenContent[r][c];
+            if (ch !== ' ') {
+                ctx.fillStyle = '#33ff33';
+                ctx.fillText(ch, c * this.charW + 1, r * this.charH + 1);
+            }
+        }
+    }
+}
+
+_scrollScreenUp() {
+    this.screenContent = this.screenContent.slice(1).concat([Array(COLS).fill(' ')]);
+    this.cursorRow = ROWS - 1;
+    this.pixelMatrix = this.pixelMatrix.slice(3).concat(
+        Array.from({length: 3}, () => Array(128).fill(0))
+    );
+    const newActive = new Set();
+    for (const key of this.activePixels) {
+        const [x, y] = key.split(',').map(Number);
+        if (y >= 3) newActive.add(`${x},${y - 3}`);
+    }
+    this.activePixels = newActive;
+    this.redrawScreen();
+}
+
+// ------------------------------------------------------------------
+//  Cursor
+// ------------------------------------------------------------------
+_blinkCursor() {
+    if (this.programRunning && !this.waitingForInput) {
+        if (this.cursorVisible) {
+            this.cursorVisible = false;
+            this._eraseCursor();
+        }
+        return;
+    }
+    this.cursorVisible = !this.cursorVisible;
+    this.updateCursorDisplay();
+}
+
+_eraseCursor() {
+    if (this._lastCursorRow !== undefined) {
+        this.drawChar(this._lastCursorRow, this._lastCursorCol,
+                      this.screenContent[this._lastCursorRow][this._lastCursorCol]);
+    }
+}
+
+updateCursorDisplay() {
+    this._eraseCursor();
+    if (this.cursorVisible || this.waitingForInput) {
+        const x = this.cursorCol * this.charW;
+        const y = this.cursorRow * this.charH;
+        this.ctx.fillStyle = '#33ff33';
+        this.ctx.fillRect(x, y, this.charW, this.charH);
+    }
+    this._lastCursorRow = this.cursorRow;
+    this._lastCursorCol = this.cursorCol;
+}
+
+// ------------------------------------------------------------------
+//  Keyboard Input — mirrors on_key_press routing
+// ------------------------------------------------------------------
+_handleKeyDown(event) {
+    // BREAK: Esc or Ctrl+C
+    if (this.programRunning && (event.key === 'Escape' || (event.ctrlKey && event.key === 'c'))) {
+        this.breakProgram();
+        event.preventDefault();
+        return;
+    }
+    // Emergency reset: Ctrl+R
+    if (event.ctrlKey && event.key === 'r') {
+        this.programRunning = false;
+        this.programPaused  = false;
+        this.waitingForInput = false;
+        this.enableImmediateMode();
+        event.preventDefault();
+        return;
+    }
+
+    // During program execution (not INPUT): update keyboard buffer
+    if (this.programRunning && !this.waitingForInput) {
+        if (!this.lastKeyPressed && event.key.length === 1) {
+            this.lastKeyPressed = event.key.toUpperCase();
+        }
+        event.preventDefault();
+        return;
+    }
+
+    // During INPUT command
+    if (this.waitingForInput) {
+        if (event.key === 'Enter') {
+            this._handleInputReturn();
+        } else if (event.key === 'Backspace') {
+            this._handleInputBackspace();
+        } else if (event.key.length === 1) {
+            this._handleInputChar(event.key.toUpperCase());
+        }
+        event.preventDefault();
+        return;
+    }
+
+    // Immediate mode
+    if (this.immediateMode && !this.programRunning) {
+        if (event.key === 'Enter') {
+            this._handleImmediateModeReturn();
+        } else if (event.key === 'Backspace') {
+            this._handleImmediateModeBackspace();
+        } else if (event.key.length === 1) {
+            this._handleImmediateModeChar(event.key.toUpperCase());
+        }
+        event.preventDefault();
+    }
+}
+
+// -- INPUT handling --
+_handleInputChar(char) {
+    if (this.cursorRow >= ROWS - 1 && this.cursorCol >= COLS - 1) {
+        this._scrollScreenUp();
+        this.cursorCol = 0;
+    }
+    this.screenContent[this.cursorRow][this.cursorCol] = char;
+    this.drawChar(this.cursorRow, this.cursorCol, char);
+    this.cursorCol++;
+    if (this.cursorCol >= COLS) {
+        this.cursorRow++;
+        this.cursorCol = 0;
+        if (this.cursorRow >= ROWS) this._scrollScreenUp();
+    }
+    this.updateCursorDisplay();
+}
+
+_handleInputBackspace() {
+    const startRow = this.inputStartRow;
+    const startCol = this.inputStartCol;
+    if (this.cursorRow > startRow || (this.cursorRow === startRow && this.cursorCol > startCol)) {
+        this.cursorCol--;
+        if (this.cursorCol < 0) {
+            this.cursorRow--;
+            this.cursorCol = COLS - 1;
+        }
+        this.screenContent[this.cursorRow][this.cursorCol] = ' ';
+        this.drawChar(this.cursorRow, this.cursorCol, ' ');
+        this.updateCursorDisplay();
+    }
+}
+
+_handleInputReturn() {
+    if (!this.waitingForInput) return;
+
+    let userInput = '';
+    const sRow = this.inputStartRow;
+    const sCol = this.inputStartCol;
+    for (let row = sRow; row <= this.cursorRow; row++) {
+        if (row === sRow && row === this.cursorRow) {
+            userInput += this.screenContent[row].slice(sCol, this.cursorCol).join('');
+        } else if (row === sRow) {
+            userInput += this.screenContent[row].slice(sCol).join('');
+        } else if (row === this.cursorRow) {
+            userInput += this.screenContent[row].slice(0, this.cursorCol).join('');
+        } else {
+            userInput += this.screenContent[row].join('');
+        }
+    }
+    userInput = userInput.trimEnd();
+    this.debugPrint(`User input received: ${userInput}`);
+
+    // Store value in variable
+    const arrayMatch = this.inputVariable.match(this._re.arrayMatch);
+    if (arrayMatch) {
+        const [, arrayName, indexExpr] = arrayMatch;
+        const index = Math.trunc(this.evaluateExpression(indexExpr));
+        if (this.arrayVariables[arrayName] && index >= 0 && index < this.arrayVariables[arrayName].length) {
+            this.arrayVariables[arrayName][index] = arrayName.endsWith('$') ? userInput : this._parseNumeric(userInput);
+        }
+    } else {
+        if (this.inputVariable.endsWith('$')) {
+            this.scalarVariables[this.inputVariable] = userInput;
+        } else {
+            this.scalarVariables[this.inputVariable] = this._parseNumeric(userInput);
+        }
+    }
+
+    this.cursorRow++;
+    this.cursorCol = 0;
+    if (this.cursorRow >= ROWS) this._scrollScreenUp();
+
+    this.waitingForInput = false;
+    this.inputVariable = null;
+    this.currentLineIndex++;
+
+    if (this.currentLineIndex >= this.sortedProgram.length) {
+        this.programRunning = false;
+        this._setStopBtn(false);
+        this.enableImmediateMode();
+    } else {
+        this.debugPrint(`Resuming execution from line index: ${this.currentLineIndex}`);
+        this.executeNextLine();
+    }
+}
+
+_parseNumeric(s) {
+    const n = Number(s);
+    return isNaN(n) ? 0 : n;
+}
+
+// ------------------------------------------------------------------
+//  Immediate Mode — mirrors enable_immediate_mode, handle_immediate_*
+// ------------------------------------------------------------------
+enableImmediateMode() {
+    if (!this.programRunning && !this.waitingForInput) {
+        this.immediateMode = true;
+        this.canvas.focus();
+        this._ensureImmediatePrompt(true);
+    }
+}
+
+disableImmediateMode() {
+    this.immediateMode = false;
+    this.commandBuffer = '';
+}
+
+_ensureImmediatePrompt(showReady = false) {
+    if (showReady && this.cursorRow === 0 && this.cursorCol === 0) {
+        this.printToScreen('READY');
+    }
+    const lineStr = this.screenContent[this.cursorRow].join('').trimEnd();
+    if (lineStr.endsWith('>')) return;
+    if (this.cursorCol > 0) this.printToScreen('');
+    this.printToScreen('>', '');
+}
+
+_handleImmediateModeChar(char) {
+    this.commandBuffer += char;
+    this.screenContent[this.cursorRow][this.cursorCol] = char;
+    this.drawChar(this.cursorRow, this.cursorCol, char);
+    this.cursorCol++;
+    if (this.cursorCol >= COLS) {
+        this.cursorRow++;
+        this.cursorCol = 0;
+        if (this.cursorRow >= ROWS) this._scrollScreenUp();
+    }
+    this.updateCursorDisplay();
+}
+
+_handleImmediateModeBackspace() {
+    if (this.commandBuffer.length > 0) {
+        this.commandBuffer = this.commandBuffer.slice(0, -1);
+        if (this.cursorCol > 1 || (this.cursorCol === 1 && this.screenContent[this.cursorRow][0] !== '>')) {
+            this.cursorCol--;
+            this.screenContent[this.cursorRow][this.cursorCol] = ' ';
+            this.drawChar(this.cursorRow, this.cursorCol, ' ');
+            this.updateCursorDisplay();
+        }
+    }
+}
+
+_handleImmediateModeReturn() {
+    const command = this.commandBuffer.trim();
+    this.commandBuffer = '';
+    this.cursorRow++;
+    this.cursorCol = 0;
+    if (this.cursorRow >= ROWS) this._scrollScreenUp();
+    if (command) this.processImmediateCommand(command);
+    if (this.immediateMode && !this.programRunning && !this.waitingForInput) {
+        this._ensureImmediatePrompt();
+    }
+}
+
+processImmediateCommand(command) {
+    this.debugPrint(`Immediate mode command: ${command}`);
+
+    // Numbered line → store in program
+    const firstWord = command.split(/\s+/)[0];
+    if (/^\d+(\.\d+)?$/.test(firstWord)) {
+        const lineNum = firstWord;
+        this.storedProgram = this.storedProgram.filter(l => !l.match(new RegExp(`^${lineNum}\\s`)));
+        if (command.split(/\s+/).length > 1) {
+            this.storedProgram.push(command);
+        }
+        this.storedProgram.sort((a, b) => parseFloat(a) - parseFloat(b));
+        this.inputArea.value = this.storedProgram.join('\n');
+        return;
+    }
+
+    const cmdParts = command.split(/\s+/);
+    const cmd = cmdParts[0];
+
+    if (cmd === 'RUN') {
+        this.disableImmediateMode();
+        this.runProgram();
+    } else if (cmd === 'LIST') {
+        this.listProgram();
+    } else if (cmd === 'NEW') {
+        this.newProgram();
+        this.storedProgram = [];
+        this.inputArea.value = '';
+        this.enableImmediateMode();
+    } else if (cmd === 'CLEAR') {
+        this.scalarVariables = {};
+        this.arrayVariables  = {};
+        this.forLoops = {};
+        this.gosubStack = [];
+        this.dataPointer = 0;
+        this.printToScreen('VARIABLES CLEARED');
+    } else if (cmd === 'CONT') {
+        if (this.programPaused) {
+            this.disableImmediateMode();
+            this.stopProgram();
+        }
+    } else if (cmd === 'LOAD') {
+        this._triggerLoad();
+    } else if (cmd === 'SAVE') {
+        this.saveProgram();
+    } else if (cmd === 'CLS') {
+        this.clearScreen();
+        this.printToScreen('READY');
+    } else if (cmd === 'DELETE') {
+        if (cmdParts.length > 1) this._deleteLines(cmdParts[1]);
+    } else {
+        try { this.executeCommand(command); }
+        catch (e) { this.printToScreen(`?${e.message || e}`); }
+    }
+}
+
+// ------------------------------------------------------------------
+//  Preprocessor — mirrors preprocess_program
+// ------------------------------------------------------------------
+preprocessProgram(program) {
+    const preprocessed = [];
+    for (const line of program) {
+        if (!line.includes(':')) { preprocessed.push(line); continue; }
+        const parts = line.split(/\s+(.+)/);
+        if (parts.length < 2) { preprocessed.push(line); continue; }
+        const lineNumber = parts[0];
+        const content = parts[1];
+        const splitPositions = this._findSplitColons(content);
+        if (splitPositions.length > 0) {
+            let prev = 0;
+            for (let idx = 0; idx < splitPositions.length; idx++) {
+                const pos = splitPositions[idx];
+                const stmt = content.substring(prev, pos).trim();
+                prev = pos + 1;
+                if (!stmt) continue;
+                preprocessed.push(idx === 0 ? `${lineNumber} ${stmt}` : `${lineNumber}.${idx} ${stmt}`);
+            }
+            const last = content.substring(prev).trim();
+            if (last) preprocessed.push(`${lineNumber}.${splitPositions.length} ${last}`);
+        } else {
+            preprocessed.push(line);
+        }
+    }
+    return preprocessed;
+}
+
+_findSplitColons(content) {
+    const positions = [];
+    let inIfClause = false;
+    const upper = content.toUpperCase();
+    let i = 0;
+    while (i < content.length) {
+        if (content[i] === '"') { i++; while (i < content.length && content[i] !== '"') i++; i++; continue; }
+        if (this._isKeywordAt(upper, i, 'REM')) break;
+        if (this._isKeywordAt(upper, i, 'IF'))   inIfClause = true;
+        if (this._isKeywordAt(upper, i, 'THEN') || this._isKeywordAt(upper, i, 'ELSE')) inIfClause = true;
+        if (content[i] === ':' && !inIfClause) positions.push(i);
+        i++;
+    }
+    return positions;
+}
+
+_isKeywordAt(text, pos, keyword) {
+    if (text.substring(pos, pos + keyword.length) !== keyword) return false;
+    if (pos > 0 && /[A-Z]/.test(text[pos - 1])) return false;
+    if (pos + keyword.length < text.length && /[A-Z]/.test(text[pos + keyword.length])) return false;
+    return true;
+}
+
+// ------------------------------------------------------------------
+//  DATA pre-scan — mirrors _prescan_data
+// ------------------------------------------------------------------
+_prescanData() {
+    this.dataValues  = [];
+    this.dataPointer = 0;
+    for (const line of this.sortedProgram) {
+        const parts = line.split(/\s+(.+)/);
+        if (parts.length < 2) continue;
+        let content = parts[1];
+        const cParts = content.split(/\s+(.+)/);
+        if (/^\d+(\.\d+)?$/.test(cParts[0]) && cParts.length > 1) content = cParts[1];
+        if (content.startsWith('DATA')) {
+            const data = content.substring(4).trim();
+            this.dataValues.push(...data.split(','));
+        }
+    }
+    if (this.dataValues.length) this.debugPrint(`Pre-scanned ${this.dataValues.length} DATA values`);
+}
+
+// ------------------------------------------------------------------
+//  Run & Execute — mirrors run_program, execute_next_line
+// ------------------------------------------------------------------
+runProgram() {
+    this.newProgram();
+    const program = this.inputArea.value.trim().split('\n');
+    this.storedProgram  = this._sortProgramLines(program);
+    this.originalProgram = [...program];
+    const preprocessed  = this.preprocessProgram(this.storedProgram);
+    this.sortedProgram  = preprocessed
+        .filter(l => l.trim() && /^\d/.test(l.split(/\s/)[0].replace('.', '')))
+        .sort((a, b) => parseFloat(a) - parseFloat(b));
+
+    this._lineNumbers  = [];
+    this._lineCommands = [];
+    this._lineCmdWords = [];
+    for (const line of this.sortedProgram) {
+        const parts = line.trim().split(/\s+(.+)/);
+        this._lineNumbers.push(parseFloat(parts[0]));
+        const cmd = parts.length > 1 ? parts[1] : '';
+        this._lineCommands.push(cmd);
+        if (cmd) {
+            let cw = cmd.split('(')[0].split(/\s/)[0];
+            if (cw.startsWith('PRINT')) cw = 'PRINT';
+            this._lineCmdWords.push(cw);
+        } else {
+            this._lineCmdWords.push('');
+        }
+    }
+
+    this._usesInkey = this.sortedProgram.some(l => l.includes('INKEY$') || l.includes('PEEK(14400)'));
+    this._prescanData();
+    this.programRunning = true;
+    this.programPaused  = false;
+    this._setStopBtn(true);
+    this.debugPrint('Starting program execution');
+    this.canvas.focus();
+    if (!this.stepping) this.executeNextLine();
+}
+
+async executeNextLine() {
+    let updateCounter = 0;
+    while (this.programRunning && !this.programPaused) {
+        if (this.currentLineIndex >= this._lineNumbers.length || this._lineNumbers.length === 0) {
+            this.programRunning = false;
+            this._setStopBtn(false);
+            this._flushGraphics();
+            this.debugPrint('Program execution completed');
+            if (!this.immediateMode) this.enableImmediateMode();
+            this.canvas.focus();
+            return;
+        }
+
+        const lineNumber = this._lineNumbers[this.currentLineIndex];
+        let command = this._lineCommands[this.currentLineIndex];
+
+        if (this.debugMode) this.debugPrint(`Executing line ${lineNumber}: ${command}`);
+
+        if (command) {
+            const cmdParts = command.split(/\s+(.+)/);
+            let cmdWord;
+            if (cmdParts.length > 1 && /^\d+$/.test(cmdParts[0])) {
+                command = cmdParts[1];
+                cmdWord = null;
+            } else {
+                cmdWord = this.currentLineIndex < this._lineCmdWords.length
+                    ? this._lineCmdWords[this.currentLineIndex] : null;
+            }
+
+            const result = this.executeCommand(command, cmdWord);
+
+            if (result && result.__delay !== undefined) {
+                await new Promise(r => setTimeout(r, result.__delay));
+                this.currentLineIndex++;
+            } else if (typeof result === 'number') {
+                const newIndex = this.findLineIndex(result);
+                if (newIndex !== -1) {
+                    this.currentLineIndex = newIndex;
+                } else {
+                    this.debugPrint(`Warning: Line number ${result} not found`);
+                    this.currentLineIndex++;
+                }
+            } else if (this.waitingForInput) {
+                this._flushGraphics();
+                return;
+            } else {
+                this.currentLineIndex++;
+            }
+        } else {
+            this.currentLineIndex++;
+        }
+
+        updateCounter++;
+        if (this._usesInkey || updateCounter % 20 === 0) {
+            await new Promise(r => setTimeout(r, 0));
+        }
+        if (updateCounter % 50 === 0) this._flushGraphics();
+
+        if (this.stepping) {
+            this._flushGraphics();
+            return;
+        }
+    }
+}
+
+newProgram() {
+    this.scalarVariables = {};
+    this.arrayVariables  = {};
+    this.forLoops        = {};
+    this.currentLineIndex = 0;
+    this.waitingForInput = false;
+    this.inputVariable   = null;
+    this.gosubStack      = [];
+    this.programRunning  = false;
+    this.programPaused   = false;
+    this.lastKeyPressed  = null;
+    this.dataPointer     = 0;
+    this.dataValues      = [];
+    this._lineNumbers    = [];
+    this._lineCommands   = [];
+    this._lineCmdWords   = [];
+    this._sortedVarsCache = [];
+    this._lastVarCount    = 0;
+    this._arrayPatterns   = {};
+    this._varRegexCache   = {};
+    this._resetScreenArrays();
+    this.clearScreen();
+    this._pendingGraphics = [];
+    this.tapePointer = 0;
+    this._lastDebugCommand = '';
+    this._lastEvalOriginal = '';
+    this._lastEvalSubstituted = '';
+    this.commandBuffer = '';
+    this.debugPrint('New program initialized.');
+}
+
+// ------------------------------------------------------------------
+//  Command Dispatch — mirrors _init_command_handlers, execute_command
+// ------------------------------------------------------------------
+_initCommandHandlers() {
+    this._commandHandlers = {
+        'PRINT':   (c) => this._cmdPrint(c),
+        'LET':     (c) => this._cmdLet(c),
+        'REM':     ()  => {},
+        'POKE':    (c) => this._cmdPoke(c),
+        'SET':     (c) => this._cmdSetReset(c),
+        'RESET':   (c) => this._cmdSetReset(c),
+        'CLS':     ()  => { this.clearScreen(); },
+        'DIM':     (c) => this._cmdDim(c),
+        'INPUT':   (c) => this._cmdInput(c),
+        'GOTO':    (c) => this._cmdGoto(c),
+        'IF':      (c) => this._cmdIf(c),
+        'FOR':     (c) => this._cmdFor(c),
+        'NEXT':    (c) => this._cmdNext(c),
+        'ON':      (c) => this._cmdOn(c),
+        'GOSUB':   (c) => this._cmdGosub(c),
+        'RETURN':  ()  => this._cmdReturn(),
+        'DELAY':   (c) => this._cmdDelay(c),
+        'DATA':    ()  => {},
+        'READ':    (c) => this._cmdRead(c),
+        'RESTORE': ()  => { this.dataPointer = 0; },
+        'STOP':    ()  => this._cmdStop(),
+        'END':     ()  => this._cmdEnd(),
+    };
+}
+
+executeCommand(command, cmdWord = null) {
+    const original = command;
+    if (this.debugMode) this._lastDebugCommand = original;
+
+    try {
+        if (command.startsWith('INPUT#-1')) return this._cmdInputTape(command);
+        if (command.startsWith('PRINT#-1')) return this._cmdPrintTape(command);
+
+        if (cmdWord === null) {
+            cmdWord = command.split('(')[0].split(/\s/)[0];
+            if (cmdWord.startsWith('PRINT')) cmdWord = 'PRINT';
+        }
+
+        let handler = this._commandHandlers[cmdWord];
+        if (!handler && command.includes('=')) {
+            command = 'LET ' + command;
+            cmdWord = 'LET';
+            handler = this._commandHandlers['LET'];
+            if (this.debugMode) this.debugPrint(`AUTO LET -> ${command}`);
+        }
+
+        if (handler) return handler(command);
+        else this.debugPrint(`Unknown command: ${command}`, 'warning');
+    } catch (e) {
+        this.debugPrint(`Error executing: ${original}`, 'error');
+        if (this._lastEvalOriginal) this.debugPrint(`Expression: ${this._lastEvalOriginal}`, 'error');
+        if (this._lastEvalSubstituted && this._lastEvalSubstituted !== this._lastEvalOriginal)
+            this.debugPrint(`Expanded: ${this._lastEvalSubstituted}`, 'error');
+        this.debugPrint(`Detail: ${e.message || e}`, 'error');
+        this.programRunning = false;
+        this._setStopBtn(false);
+    }
+    return undefined;
+}
+
+// ------------------------------------------------------------------
+//  Number Formatting — mirrors _format_number
+// ------------------------------------------------------------------
+_formatNumber(value) {
+    if (typeof value === 'number') {
+        let s;
+        if (Number.isFinite(value) && value === Math.trunc(value)) {
+            s = String(Math.trunc(value));
+        } else {
+            s = String(value);
+        }
+        return value >= 0 ? ' ' + s + ' ' : s + ' ';
+    }
+    return String(value);
+}
+
+// ------------------------------------------------------------------
+//  PRINT — mirrors _cmd_print
+// ------------------------------------------------------------------
+_cmdPrint(command) {
+    const isPrintAt = command.startsWith('PRINT@');
+    const savedRow = this.cursorRow;
+    const savedCol = this.cursorCol;
+
+    let content;
+    if (isPrintAt) {
+        const match = command.match(this._re.printAt);
+        if (match) {
+            const posExpr = match[1];
+            content = match[2] || '';
+            let position = Math.trunc(this.evaluateExpression(posExpr)) - 1;
+            this.cursorRow = Math.trunc(position / COLS);
+            this.cursorCol = position % COLS;
+        } else return;
+    } else {
+        content = command.substring(5).trim();
+    }
+
+    let output = '';
+    let cursorPos = this.cursorCol;
+    let start = 0;
+
+    while (start < content.length) {
+        const end = this._findNextSeparator(content, start);
+        let part;
+        if (end === -1) { part = content.substring(start); start = content.length; }
+        else { part = content.substring(start, end); start = end + 1; }
+
+        if (part.trim()) {
+            if (part.includes('TAB(')) {
+                const m = part.match(this._re.tab);
+                if (m) {
+                    const tabPos = parseInt(m[1]);
+                    const spacesNeeded = Math.max(0, tabPos - cursorPos);
+                    output += ' '.repeat(spacesNeeded);
+                    cursorPos = tabPos;
+                }
+            } else {
+                const evaluated = this.evaluateExpression(part.trim());
+                const formatted = this._formatNumber(evaluated);
+                output += formatted;
+                cursorPos += formatted.length;
+            }
+        }
+
+        if (end !== -1 && content[end] === ',') {
+            const spacesToAdd = (16 - cursorPos % 16) % 16;
+            output += ' '.repeat(spacesToAdd);
+            cursorPos += spacesToAdd;
+        }
+    }
+
+    if (isPrintAt && output) {
+        const clearLen = Math.min(output.length, COLS - this.cursorCol);
+        if (clearLen > 0) {
+            this.ctx.fillStyle = 'black';
+            this.ctx.fillRect(this.cursorCol * this.charW, this.cursorRow * this.charH,
+                              clearLen * this.charW, this.charH);
+            for (let i = 0; i < clearLen; i++) {
+                this.screenContent[this.cursorRow][this.cursorCol + i] = ' ';
+            }
+        }
+    }
+
+    const trimmed = content.trimEnd();
+    if (trimmed.endsWith(';') || trimmed.endsWith(',')) {
+        this.printToScreen(output, '');
+    } else {
+        this.printToScreen(output, '\n');
+    }
+
+    if (isPrintAt) {
+        this.cursorRow = savedRow;
+        this.cursorCol = savedCol;
+    }
+}
+
+_findNextSeparator(s, start) {
+    let parenCount = 0;
+    for (let i = start; i < s.length; i++) {
+        if (s[i] === '(' && !this._isWithinQuotes(s, i)) parenCount++;
+        else if (s[i] === ')' && !this._isWithinQuotes(s, i)) parenCount--;
+        else if ((s[i] === ',' || s[i] === ';') && parenCount === 0 && !this._isWithinQuotes(s, i))
+            return i;
+    }
+    return -1;
+}
+
+_isWithinQuotes(s, pos) {
+    let count = 0;
+    for (let i = 0; i < pos; i++) if (s[i] === '"') count++;
+    return count % 2 === 1;
+}
+
+// ------------------------------------------------------------------
+//  LET — mirrors _cmd_let
+// ------------------------------------------------------------------
+_cmdLet(command) {
+    const eqPos = command.indexOf('=', 3);
+    if (eqPos === -1) return;
+    const varName = command.substring(3, eqPos).trim();
+    const valueExpr = command.substring(eqPos + 1).trim();
+
+    const arrayMatch = varName.match(this._re.arrayMatch);
+    if (arrayMatch) {
+        const [, arrayName, indexExpr] = arrayMatch;
+        const index = Math.trunc(this.evaluateExpression(indexExpr));
+        if (this.arrayVariables[arrayName]) {
+            if (index >= 0 && index < this.arrayVariables[arrayName].length) {
+                this.arrayVariables[arrayName][index] = arrayName.endsWith('$')
+                    ? String(this.evaluateExpression(valueExpr))
+                    : this.evaluateExpression(valueExpr);
+            } else { this._errorBs(arrayName, index); }
+        } else { this._errorSn(`Array ${arrayName} not defined`); }
+    } else {
+        if (varName.endsWith('$')) {
+            this.scalarVariables[varName] = String(this.evaluateExpression(valueExpr));
+        } else {
+            this.scalarVariables[varName] = this.evaluateExpression(valueExpr);
+        }
+        if (this.debugMode) this.debugPrint(`${varName} = ${this.scalarVariables[varName]}`);
+    }
+}
+
+// ------------------------------------------------------------------
+//  POKE, SET/RESET, CLS, DIM
+// ------------------------------------------------------------------
+_cmdPoke(command) {
+    const m = command.match(this._re.poke);
+    if (m) {
+        const addr = Math.trunc(this.evaluateExpression(m[1]));
+        const val  = Math.trunc(this.evaluateExpression(m[2]));
+        this.poke(addr, val);
+    }
+}
+
+_cmdSetReset(command) {
+    try {
+        const cmdType = command.startsWith('SET') ? 'SET' : 'RESET';
+        const parenStart = command.indexOf('(');
+        const parenEnd   = command.lastIndexOf(')');
+        if (parenStart === -1 || parenEnd === -1) return;
+        const coords = command.substring(parenStart + 1, parenEnd);
+        const commaPos = this._findUnquotedComma(coords);
+        if (commaPos === -1) return;
+        const x = Math.trunc(this.evaluateExpression(coords.substring(0, commaPos).trim())) - 1;
+        const y = Math.trunc(this.evaluateExpression(coords.substring(commaPos + 1).trim())) - 1;
+        if (cmdType === 'SET') this.setPixel(x, y);
+        else this.resetPixel(x, y);
+    } catch (e) {
+        this.debugPrint(`Invalid ${command.split(/\s/)[0]} command: ${command}`, 'error');
+    }
+}
+
+_findUnquotedComma(s) {
+    let depth = 0;
+    for (let i = 0; i < s.length; i++) {
+        if (s[i] === '(') depth++;
+        else if (s[i] === ')') depth--;
+        else if (s[i] === ',' && depth === 0) return i;
+    }
+    return -1;
+}
+
+_cmdDim(command) {
+    const m = command.match(this._re.dim);
+    if (m) {
+        const arrayName = m[1];
+        const size = Math.trunc(this.evaluateExpression(m[2]));
+        this.arrayVariables[arrayName] = arrayName.endsWith('$')
+            ? Array(size + 1).fill('')
+            : Array(size + 1).fill(0);
+        this._arrayPatterns[arrayName] = new RegExp('\\b' + arrayName.replace('$', '\\$') + '\\(');
+        this.debugPrint(`Array ${arrayName} dimensioned with size ${size + 1}`);
+    }
+}
+
+// ------------------------------------------------------------------
+//  INPUT — mirrors _cmd_input
+// ------------------------------------------------------------------
+_cmdInput(command) {
+    const m = command.match(this._re.inputPrompt);
+    let varName;
+    if (m) {
+        this.printToScreen(m[1], '');
+        varName = m[2];
+    } else {
+        varName = command.substring(5).trim();
+        this.printToScreen('? ', '');
+    }
+    this.waitingForInput = true;
+    this.inputVariable = varName;
+    this.inputStartRow = this.cursorRow;
+    this.inputStartCol = this.cursorCol;
+    this.canvas.focus();
+}
+
+// ------------------------------------------------------------------
+//  GOTO, IF/THEN/ELSE, FOR/NEXT, ON GOTO, GOSUB/RETURN
+// ------------------------------------------------------------------
+_cmdGoto(command) {
+    return parseInt(command.substring(4).trim());
+}
+
+_cmdIf(command) {
+    const m = command.match(this._re.ifThen);
+    if (m) {
+        const condition = m[1];
+        const thenAction = m[2];
+        const elseAction = m[4] || null;
+        const result = this.evaluateExpression(condition);
+        if (result) {
+            if (this.debugMode) this.debugPrint(`IF ${condition} -> TRUE; THEN ${thenAction}`);
+            return this._executeMultiStatement(thenAction);
+        } else if (elseAction) {
+            if (this.debugMode) this.debugPrint(`IF ${condition} -> FALSE; ELSE ${elseAction}`);
+            return this._executeMultiStatement(elseAction);
+        }
+    }
+}
+
+_executeMultiStatement(statements) {
+    const parts = this._splitOnUnquotedColons(statements);
+    let result;
+    for (const part of parts) {
+        const trimmed = part.trim();
+        if (trimmed) {
+            result = this.executeCommand(trimmed);
+            if (typeof result === 'number') return result;
+        }
+    }
+    return result;
+}
+
+_splitOnUnquotedColons(text) {
+    const parts = [];
+    let current = [];
+    let inQuotes = false;
+    for (const ch of text) {
+        if (ch === '"') inQuotes = !inQuotes;
+        if (ch === ':' && !inQuotes) { parts.push(current.join('')); current = []; }
+        else current.push(ch);
+    }
+    parts.push(current.join(''));
+    return parts;
+}
+
+_cmdFor(command) {
+    const m = command.match(this._re.forLoop);
+    if (m) {
+        const varName = m[1];
+        const start = this.evaluateExpression(m[2]);
+        const end   = this.evaluateExpression(m[3]);
+        const step  = m[5] ? this.evaluateExpression(m[5]) : 1;
+        const nextIdx = this.currentLineIndex + 1;
+        const nextLn  = nextIdx < this._lineNumbers.length ? this._lineNumbers[nextIdx] : null;
+        this.forLoops[varName] = { start, end, step, current: start, lineIndex: this.currentLineIndex, nextLineNumber: nextLn };
+        this.scalarVariables[varName] = start;
+        if (this.debugMode) this.debugPrint(`FOR ${varName}=${start} TO ${end} STEP ${step}`);
+    }
+}
+
+_cmdNext(command) {
+    const keys = Object.keys(this.forLoops);
+    if (keys.length === 0) { this._errorNf(''); return; }
+    let nextVar = command.substring(4).trim();
+    let varName;
+    if (nextVar) {
+        if (this.forLoops[nextVar]) varName = nextVar;
+        else { this._errorNf(nextVar); return; }
+    } else {
+        varName = keys[keys.length - 1];
+    }
+    const loop = this.forLoops[varName];
+    loop.current += loop.step;
+    this.scalarVariables[varName] = loop.current;
+    if ((loop.step > 0 && loop.current <= loop.end) || (loop.step < 0 && loop.current >= loop.end)) {
+        return loop.nextLineNumber;
+    } else {
+        delete this.forLoops[varName];
+    }
+}
+
+_cmdOn(command) {
+    const m = command.match(this._re.onGoto);
+    if (m) {
+        const value = Math.trunc(this.evaluateExpression(m[1]));
+        const targets = m[2].split(',').map(s => parseInt(s.trim()));
+        if (value >= 1 && value <= targets.length) return targets[value - 1];
+    }
+}
+
+_cmdGosub(command) {
+    const lineNum = parseInt(command.substring(5).trim());
+    this.gosubStack.push(this.currentLineIndex + 1);
+    return lineNum;
+}
+
+_cmdReturn() {
+    if (this.gosubStack.length > 0) {
+        const returnIndex = this.gosubStack.pop();
+        if (returnIndex < this._lineNumbers.length) return this._lineNumbers[returnIndex];
+    } else { this._errorRg(); }
+}
+
+_cmdDelay(command) {
+    const delayTime = parseInt(command.split(/\s+/)[1]) || 0;
+    return { __delay: delayTime * 10 };
+}
+
+_cmdRead(command) {
+    const variables = command.substring(4).split(',').map(s => s.trim());
+    for (const varName of variables) {
+        if (this.dataPointer >= this.dataValues.length) { this._errorOd(); return; }
+        let value = this.dataValues[this.dataPointer].trim();
+        const arrayMatch = varName.match(this._re.arrayMatch);
+        if (arrayMatch) {
+            const [, arrName, idxExpr] = arrayMatch;
+            const idx = Math.trunc(this.evaluateExpression(idxExpr));
+            if (this.arrayVariables[arrName] && idx >= 0 && idx < this.arrayVariables[arrName].length) {
+                this.arrayVariables[arrName][idx] = arrName.endsWith('$')
+                    ? value.replace(/^['"]|['"]$/g, '') : this.evaluateExpression(value);
+            }
+        } else {
+            if (varName.endsWith('$')) {
+                this.scalarVariables[varName] = value.replace(/^['"]|['"]$/g, '');
+            } else {
+                this.scalarVariables[varName] = this.evaluateExpression(value);
+            }
+        }
+        this.dataPointer++;
+    }
+}
+
+_cmdStop() {
+    const ln = this._getCurrentLineNumber();
+    this.printToScreen(`BREAK IN ${ln}`);
+    this.programPaused = true;
+    this._setStopBtn(true, 'CONT');
+    this.enableImmediateMode();
+}
+
+_cmdEnd() {
+    this.programRunning = false;
+    this._setStopBtn(false);
+    this._flushGraphics();
+}
+
+// -- Tape I/O (in-memory) --
+_cmdInputTape(command) {
+    const varName = command.split(',')[1].trim();
+    if (this.tapePointer < this.tapeData.length) {
+        this.scalarVariables[varName] = this.tapeData[this.tapePointer++];
+    } else {
+        this.debugPrint('Error: No more data on tape');
+    }
+}
+
+_cmdPrintTape(command) {
+    const data = this.evaluateExpression(command.split(',').slice(1).join(',').trim());
+    this.tapeData.push(String(data));
+}
+
+// ------------------------------------------------------------------
+//  Expression Evaluator — mirrors evaluate_expression, _eval_nested
+// ------------------------------------------------------------------
+static PROTECTED_FUNCTIONS = new Set([
+    'SIN','COS','TAN','EXP','LOG','SQR','ABS','INT','RND',
+    'CHR$','STR$','LEFT$','RIGHT$','MID$','INSTR','LEN',
+    'ASC','VAL','PEEK','POINT','FIX','SGN','STRING$'
+]);
+
+evaluateExpression(expr) {
+    this._lastEvalOriginal    = expr;
+    this._lastEvalSubstituted = expr;
+    this.replaced = false;
+    const stripped = expr.trim();
+
+    // Fast path: integer
+    if (/^\d+$/.test(stripped)) return parseInt(stripped);
+    // Fast path: negative integer
+    if (stripped.length > 1 && stripped[0] === '-' && /^\d+$/.test(stripped.substring(1)))
+        return parseInt(stripped);
+    // Fast path: simple variable lookup
+    if (this.scalarVariables.hasOwnProperty(stripped)) return this.scalarVariables[stripped];
+
+    return this._evalNested(expr);
+}
+
+_buildQuoteMap(s) {
+    const n = s.length;
+    const map = new Uint8Array(n);
+    let inDouble = 0, inSingle = 0;
+    for (let i = 0; i < n; i++) {
+        const ch = s[i];
+        if (ch === '"' && !inSingle) inDouble ^= 1;
+        else if (ch === "'" && !inDouble) inSingle ^= 1;
+        map[i] = inDouble | inSingle;
+    }
+    return map;
+}
+
+_evalNested(expr) {
+    // Stage 1: Quote map
+    let quoteMap = this._buildQuoteMap(expr);
+    const isInQuotes = (pos) => pos < quoteMap.length && quoteMap[pos];
+
+    // Stage 2: INKEY$ replacement
+    const inkeyMatch = this._re.inkey.exec(expr);
+    if (inkeyMatch && !isInQuotes(inkeyMatch.index)) {
+        const inkeyResult = this.inkey();
+        expr = expr.substring(0, inkeyMatch.index) + `'${inkeyResult}'` + expr.substring(inkeyMatch.index + inkeyMatch[0].length);
+        this.replaced = true;
+        quoteMap = this._buildQuoteMap(expr);
+    }
+
+    // Stage 3: Single-pass keyword translation
+    const prevExpr = expr;
+    expr = expr.replace(this._re.allKeywords, (match, offset) => {
+        if (offset < quoteMap.length && quoteMap[offset]) return match;
+        if (match === 'RND') return String(Math.random());
+        return KEYWORD_REPLACEMENTS[match] || match;
+    });
+    // Reset the global regex lastIndex
+    this._re.allKeywords.lastIndex = 0;
+    if (expr !== prevExpr) quoteMap = this._buildQuoteMap(expr);
+
+    // Stage 4: Built-in function dispatch
+    while (true) {
+        const funcMatch = this._re.funcMatch.exec(expr);
+        if (!funcMatch) break;
+        if (isInQuotes(funcMatch.index)) break;
+
+        const funcName  = funcMatch[1];
+        const innerExpr = funcMatch[2];
+        const innerValue = this._evalNested(innerExpr);
+
+        const handler = this._builtinFunctions[funcName];
+        if (handler) {
+            const result = handler(innerValue, innerExpr);
+            expr = expr.substring(0, funcMatch.index) + String(result) + expr.substring(funcMatch.index + funcMatch[0].length);
+            quoteMap = this._buildQuoteMap(expr);
+        } else {
+            this.debugPrint(`Unknown function: ${funcName}`, 'error');
+            break;
+        }
+    }
+
+    // Stage 5: Array reference substitution
+    if (expr.includes('(') && Object.keys(this.arrayVariables).length > 0) {
+        for (const arrayName of Object.keys(this.arrayVariables)) {
+            if (!Array.isArray(this.arrayVariables[arrayName])) continue;
+            if (!this._arrayPatterns[arrayName]) {
+                this._arrayPatterns[arrayName] = new RegExp('\\b' + arrayName.replace('$', '\\$') + '\\(');
+            }
+            const arrayRe = this._arrayPatterns[arrayName];
+            let searchStart = 0;
+            while (true) {
+                arrayRe.lastIndex = searchStart;
+                const m = arrayRe.exec(expr);
+                if (!m) break;
+                const startIndex = m.index + m[0].length;
+                let parenCount = 1, endIndex = startIndex;
+                for (let i = startIndex; i < expr.length; i++) {
+                    if (expr[i] === '(') parenCount++;
+                    else if (expr[i] === ')') { parenCount--; if (parenCount === 0) { endIndex = i; break; } }
+                }
+                if (parenCount !== 0) break;
+                const indexExpr = expr.substring(startIndex, endIndex);
+                const index = Math.trunc(this._evalNested(indexExpr));
+                if (index >= 0 && index < this.arrayVariables[arrayName].length) {
+                    let replacement = this.arrayVariables[arrayName][index];
+                    if (arrayName.endsWith('$') || typeof replacement === 'string')
+                        replacement = `'${replacement}'`;
+                    expr = expr.substring(0, m.index) + String(replacement) + expr.substring(endIndex + 1);
+                    searchStart = m.index + String(replacement).length;
+                } else {
+                    this._errorBs(arrayName, index);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Stage 6: Scalar variable substitution
+    const parts = expr.split(this._re.stringSplit);
+    const hasAlpha = /[a-zA-Z]/.test(expr);
+    if (hasAlpha && Object.keys(this.scalarVariables).length > 0) {
+        const varCount = Object.keys(this.scalarVariables).length;
+        if (varCount !== this._lastVarCount) {
+            this._sortedVarsCache = Object.keys(this.scalarVariables).sort((a, b) => b.length - a.length);
+            this._lastVarCount = varCount;
+        }
+        for (let pi = 0; pi < parts.length; pi += 2) {
+            if (!parts[pi].trim()) continue;
+            let partQuoteMap = this._buildQuoteMap(parts[pi]);
+
+            for (const varName of this._sortedVarsCache) {
+                const value = this.scalarVariables[varName];
+                if (!this._varRegexCache[varName]) {
+                    let pattern;
+                    if (TRS80Simulator.PROTECTED_FUNCTIONS.has(varName.toUpperCase())) {
+                        pattern = '\\b' + varName.replace('$', '\\$') + '\\b(?!\\()';
+                    } else {
+                        pattern = varName.endsWith('$')
+                            ? varName.replace('$', '\\$')
+                            : '\\b' + varName + '\\b';
+                    }
+                    this._varRegexCache[varName] = new RegExp(pattern, 'g');
+                }
+                const varRe = this._varRegexCache[varName];
+                varRe.lastIndex = 0;
+
+                const newParts = [];
+                let lastEnd = 0;
+                let m;
+                while ((m = varRe.exec(parts[pi])) !== null) {
+                    const s = m.index, e = m.index + m[0].length;
+                    if (!(s < partQuoteMap.length && partQuoteMap[s])) {
+                        newParts.push(parts[pi].substring(lastEnd, s));
+                        if (varName.endsWith('$')) {
+                            newParts.push(`'${String(value).trimEnd()}'`);
+                        } else {
+                            newParts.push(String(value));
+                        }
+                    } else {
+                        newParts.push(parts[pi].substring(lastEnd, e));
+                    }
+                    lastEnd = e;
+                }
+                newParts.push(parts[pi].substring(lastEnd));
+                const newPart = newParts.join('');
+                if (newPart !== parts[pi]) {
+                    parts[pi] = newPart;
+                    partQuoteMap = this._buildQuoteMap(parts[pi]);
+                }
+            }
+        }
+    }
+    expr = parts.join('');
+    this._lastEvalSubstituted = expr;
+
+    // Stage 7: Comparison wrapping for TRS-80 semantics
+    expr = this._wrapTrs80Logic(expr);
+    this._lastEvalSubstituted = expr;
+
+    // Stage 8: eval()
+    try {
+        const result = eval(expr);
+        return result;
+    } catch (e) {
+        if (this.debugMode) this.debugPrint(`Evaluation failed: ${e.message}`, 'error');
+        return expr.replace(/^['"]|['"]$/g, '');
+    }
+}
+
+// ------------------------------------------------------------------
+//  TRS-80 Comparison & Logic Wrapping
+// ------------------------------------------------------------------
+_wrapTrs80Logic(expr) {
+    for (const [opStr, funcName] of [['>=','_ge'],['<=','_le'],['!=','_ne'],['==','_eq'],['>','_gt'],['<','_lt']]) {
+        while (true) {
+            const pos = this._findCompOp(expr, opStr);
+            if (pos === -1) break;
+            const leftStart = this._scanLeftBoundary(expr, pos);
+            const rightEnd  = this._scanRightBoundary(expr, pos + opStr.length);
+            const left  = expr.substring(leftStart, pos).trim();
+            const right = expr.substring(pos + opStr.length, rightEnd).trim();
+            expr = expr.substring(0, leftStart) + `${funcName}(${left},${right})` + expr.substring(rightEnd);
+        }
+    }
+    expr = this._wrapNotOps(expr);
+    return expr;
+}
+
+_findCompOp(expr, opStr) {
+    let inQuote = false;
+    const opLen = opStr.length;
+    let i = 0;
+    while (i <= expr.length - opLen) {
+        if (expr[i] === '"') { inQuote = !inQuote; i++; continue; }
+        if (!inQuote && expr.substring(i, i + opLen) === opStr) {
+            if (opStr === '>' && i + 1 < expr.length && expr[i + 1] === '=') { i += 2; continue; }
+            if (opStr === '<' && i + 1 < expr.length && expr[i + 1] === '=') { i += 2; continue; }
+            return i;
+        }
+        i++;
+    }
+    return -1;
+}
+
+_scanLeftBoundary(expr, opPos) {
+    let depth = 0, i = opPos - 1;
+    while (i >= 0 && expr[i] === ' ') i--;
+    while (i >= 0) {
+        const ch = expr[i];
+        if (ch === ')') depth++;
+        else if (ch === '(') { if (depth > 0) depth--; else return i + 1; }
+        else if (ch === "'") { i--; while (i >= 0 && expr[i] !== "'") i--; }
+        else if (depth === 0) {
+            if (ch === '&' || ch === '|' || ch === ',') return i + 1;
+            if (i >= 3 && expr.substring(i - 3, i + 1) === 'not ') return i + 1;
+        }
+        i--;
+    }
+    return 0;
+}
+
+_scanRightBoundary(expr, opEnd) {
+    let depth = 0, i = opEnd;
+    while (i < expr.length && expr[i] === ' ') i++;
+    while (i < expr.length) {
+        const ch = expr[i];
+        if (ch === '(') depth++;
+        else if (ch === ')') { if (depth > 0) depth--; else return i; }
+        else if (ch === "'") { i++; while (i < expr.length && expr[i] !== "'") i++; }
+        else if (depth === 0) {
+            if (ch === '&' || ch === '|' || ch === ',') return i;
+        }
+        i++;
+    }
+    return expr.length;
+}
+
+_wrapNotOps(expr) {
+    while (true) {
+        let inQuote = false, pos = -1;
+        for (let i = 0; i < expr.length; i++) {
+            if (expr[i] === '"') inQuote = !inQuote;
+            else if (!inQuote && expr.substring(i, i + 4) === 'not ') {
+                if (i === 0 || !/[a-zA-Z]/.test(expr[i - 1])) { pos = i; break; }
+            }
+        }
+        if (pos === -1) break;
+        let opStart = pos + 4;
+        while (opStart < expr.length && expr[opStart] === ' ') opStart++;
+        let depth = 0, j = opStart;
+        if (j < expr.length && expr[j] === '(') {
+            depth = 1; j++;
+            while (j < expr.length && depth > 0) {
+                if (expr[j] === '(') depth++; else if (expr[j] === ')') depth--;
+                j++;
+            }
+        } else {
+            while (j < expr.length) {
+                const ch = expr[j];
+                if (ch === '(') depth++;
+                else if (ch === ')') { if (depth > 0) depth--; else break; }
+                else if (depth === 0 && (ch === '&' || ch === '|')) break;
+                j++;
+            }
+        }
+        const operand = expr.substring(opStart, j);
+        expr = expr.substring(0, pos) + `_bnot(${operand})` + expr.substring(j);
+    }
+    return expr;
+}
+
+// ------------------------------------------------------------------
+//  Built-in Functions — mirrors _init_builtin_functions
+// ------------------------------------------------------------------
+_initBuiltinFunctions() {
+    this._builtinFunctions = {
+        'INT':     (v) => Math.trunc(Number(v)),
+        'SIN':     (v) => Math.sin(Number(v)),
+        'COS':     (v) => Math.cos(Number(v)),
+        'TAN':     (v) => Math.tan(Number(v)),
+        'SQR':     (v) => Math.sqrt(Number(v)),
+        'LOG':     (v) => Math.log(Number(v)),
+        'EXP':     (v) => Math.exp(Number(v)),
+        'SGN':     (v) => { const n = Number(v); return n < 0 ? -1 : (n > 0 ? 1 : 0); },
+        'ABS':     (v) => Math.abs(Number(v)),
+        'FIX':     (v) => Math.trunc(Number(v)),
+        'VAL':     (v) => { const s = String(v).replace(/^['"]|['"]$/g, ''); const n = parseFloat(s); return isNaN(n) ? 0 : (n === Math.trunc(n) ? Math.trunc(n) : n); },
+        'RND':     (v, ie) => this._funcRnd(v),
+        'ASC':     (v) => String(v).replace(/^['"]|['"]$/g, '').charCodeAt(0) || 0,
+        'PEEK':    (v) => this.peek(Math.trunc(Number(v))),
+        'POINT':   (v, ie) => this._funcPoint(ie),
+        'LEN':     (v) => String(v).replace(/^['"]|['"]$/g, '').length,
+        'STR$':    (v) => this._funcStr(v),
+        'CHR$':    (v) => `'${String.fromCharCode(Math.trunc(Number(v)))}'`,
+        'STRING$': (v, ie) => this._funcString(ie),
+        'LEFT$':   (v, ie) => this._funcLeft(ie),
+        'RIGHT$':  (v, ie) => this._funcRight(ie),
+        'MID$':    (v, ie) => this._funcMid(ie),
+        'INSTR':   (v, ie) => this._funcInstr(ie),
+    };
+}
+
+_funcRnd(v) {
+    const n = Math.trunc(Number(v));
+    if (n === 0) return Math.random();
+    return Math.floor(Math.random() * n) + 1;
+}
+
+_funcStr(v) {
+    const num = Number(v);
+    let s = (num === Math.trunc(num)) ? String(Math.trunc(num)) : String(num);
+    if (num >= 0) s = ' ' + s;
+    return `'${s}'`;
+}
+
+_funcPoint(innerExpr) {
+    try {
+        const parts = innerExpr.split(',');
+        const x = Math.trunc(this._evalNested(parts[0].trim()));
+        const y = Math.trunc(this._evalNested(parts[1].trim()));
+        return this.getPixel(x - 1, y - 1);
+    } catch (e) { return 0; }
+}
+
+_funcString(innerExpr) {
+    const parts = innerExpr.split(',');
+    const count = Math.trunc(this._evalNested(parts[0].trim()));
+    let char = this._evalNested(parts[1].trim());
+    if (typeof char === 'number') char = String.fromCharCode(char);
+    else char = String(char).replace(/^['"]|['"]$/g, '')[0] || '';
+    return `'${char.repeat(count)}'`;
+}
+
+_funcLeft(innerExpr) {
+    const parts = innerExpr.split(',');
+    const str = String(this._evalNested(parts[0].trim())).replace(/^['"]|['"]$/g, '');
+    const len = Math.trunc(this._evalNested(parts[1].trim()));
+    return `'${str.substring(0, len)}'`;
+}
+
+_funcRight(innerExpr) {
+    const parts = innerExpr.split(',');
+    const str = String(this._evalNested(parts[0].trim())).replace(/^['"]|['"]$/g, '');
+    const len = Math.trunc(this._evalNested(parts[1].trim()));
+    return `'${str.slice(-len)}'`;
+}
+
+_funcMid(innerExpr) {
+    const parts = innerExpr.split(',');
+    const str   = String(this._evalNested(parts[0].trim())).replace(/^['"]|['"]$/g, '');
+    const start = Math.trunc(this._evalNested(parts[1].trim())) - 1;
+    if (parts.length > 2) {
+        const len = Math.trunc(this._evalNested(parts[2].trim()));
+        return `'${str.substring(start, start + len)}'`;
+    }
+    return `'${str.substring(start)}'`;
+}
+
+_funcInstr(innerExpr) {
+    const parts = innerExpr.split(',');
+    let startPos = 1, str, find;
+    if (parts.length === 2) {
+        str  = String(this._evalNested(parts[0].trim())).replace(/^['"]|['"]$/g, '');
+        find = String(this._evalNested(parts[1].trim())).replace(/^['"]|['"]$/g, '');
+    } else if (parts.length >= 3) {
+        startPos = Math.trunc(this._evalNested(parts[0].trim()));
+        str  = String(this._evalNested(parts[1].trim())).replace(/^['"]|['"]$/g, '');
+        find = String(this._evalNested(parts[2].trim())).replace(/^['"]|['"]$/g, '');
+    } else return 0;
+    const idx = str.indexOf(find, startPos - 1);
+    return idx === -1 ? 0 : idx + 1;
+}
+
+// ------------------------------------------------------------------
+//  Memory Model — PEEK / POKE / INKEY$
+// ------------------------------------------------------------------
+poke(address, value) {
+    if (address >= 15360 && address <= 16383) {
+        const screenPos = address - 15360;
+        const row = Math.trunc(screenPos / COLS);
+        const col = screenPos % COLS;
+        if (row < ROWS) {
+            this.screenContent[row][col] = String.fromCharCode(value);
+            this.drawChar(row, col, String.fromCharCode(value));
+        }
+    }
+}
+
+peek(address) {
+    if (address === 14400) {
+        if (this.lastKeyPressed) {
+            const kv = this.lastKeyPressed.charCodeAt(0);
+            this.lastKeyPressed = null;
+            return kv;
+        }
+        return 0;
+    }
+    if (address >= 15360 && address <= 16383) {
+        const screenPos = address - 15360;
+        const row = Math.trunc(screenPos / COLS);
+        const col = screenPos % COLS;
+        if (row < ROWS) return this.screenContent[row][col].charCodeAt(0);
+    }
+    return 0;
+}
+
+inkey() {
+    const key = this.lastKeyPressed;
+    if (key) { this.lastKeyPressed = null; return key; }
+    return '';
+}
+
+// ------------------------------------------------------------------
+//  Graphics — SET / RESET / POINT
+// ------------------------------------------------------------------
+setPixel(x, y) {
+    if (x >= 0 && x < 128 && y >= 0 && y < 48) {
+        this.pixelMatrix[y][x] = 1;
+        this._pendingGraphics.push(['set', x, y]);
+        this.activePixels.add(`${x},${y}`);
+        if (this._pendingGraphics.length >= 20) this._flushGraphics();
+    }
+}
+
+resetPixel(x, y) {
+    if (x >= 0 && x < 128 && y >= 0 && y < 48) {
+        this.pixelMatrix[y][x] = 0;
+        this._pendingGraphics.push(['reset', x, y]);
+        this.activePixels.delete(`${x},${y}`);
+        if (this._pendingGraphics.length >= 20) this._flushGraphics();
+    }
+}
+
+_flushGraphics() {
+    if (!this._pendingGraphics.length) return;
+    const ctx = this.ctx;
+    const ps = this.pixelSize;
+    for (const [op, x, y] of this._pendingGraphics) {
+        ctx.fillStyle = op === 'set' ? '#33ff33' : 'black';
+        ctx.fillRect(x * ps, y * ps, ps, ps);
+    }
+    this._pendingGraphics = [];
+}
+
+getPixel(x, y) {
+    if (x >= 0 && x < 128 && y >= 0 && y < 48) return this.pixelMatrix[y][x];
+    return 0;
+}
+
+// ------------------------------------------------------------------
+//  File I/O — SAVE / LOAD
+// ------------------------------------------------------------------
+saveProgram() {
+    const lines = this._sortProgramLines(this.inputArea.value.trim().split('\n'));
+    this.inputArea.value = lines.join('\n');
+    this.storedProgram = lines;
+    const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'program.bas';
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+_triggerLoad() {
+    document.getElementById('fileInput').click();
+}
+
+_handleFileLoad(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        const content = e.target.result;
+        const lines = this._sortProgramLines(content.trim().split('\n'));
+        this.inputArea.value = lines.join('\n');
+        this.storedProgram = lines;
+        this.printToScreen(`LOADED: ${file.name}`);
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+}
+
+// ------------------------------------------------------------------
+//  Debug & Error
+// ------------------------------------------------------------------
+toggleDebug() {
+    this.debugMode = !this.debugMode;
+    const btn = document.getElementById('btnDebug');
+    if (this.debugMode) {
+        btn.textContent = 'Debug: OFF';
+        this.debugPanel.style.display = 'block';
+    } else {
+        btn.textContent = 'Debug: ON';
+        this.debugPanel.style.display = 'none';
+    }
+}
+
+debugPrint(message, level = 'info') {
+    if (!this.debugMode && level === 'info') return;
+    const ln = this._getCurrentLineNumber();
+    const prefix = `[Line ${ln} | Step ${this.currentLineIndex + 1}]`;
+    const tag = level === 'error' ? ' ERROR:' : (level === 'warning' ? ' WARNING:' : '');
+    this.debugText.value += `${prefix}${tag} ${message}\n`;
+    this.debugText.scrollTop = this.debugText.scrollHeight;
+}
+
+_getCurrentLineNumber() {
+    if (this.currentLineIndex < this._lineNumbers.length) {
+        const ln = this._lineNumbers[this.currentLineIndex];
+        return ln === Math.trunc(ln) ? String(Math.trunc(ln)) : String(ln);
+    }
+    return '?';
+}
+
+_errorSn(detail = '') { const ln = this._getCurrentLineNumber(); const msg = `?SN ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(detail ? `${msg} - ${detail}` : msg, 'error'); }
+_errorFc(detail = '') { const ln = this._getCurrentLineNumber(); const msg = `?FC ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(detail ? `${msg} - ${detail}` : msg, 'error'); }
+_errorUl(lineNum)     { const ln = this._getCurrentLineNumber(); const msg = `?UL ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(`${msg} - Line ${lineNum} not found`, 'error'); }
+_errorBs(arr, idx)    { const ln = this._getCurrentLineNumber(); const msg = `?BS ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(`${msg} - Index ${idx} out of bounds for ${arr}`, 'error'); }
+_errorOd()            { const ln = this._getCurrentLineNumber(); const msg = `?OD ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(msg, 'error'); }
+_errorNf(v)           { const ln = this._getCurrentLineNumber(); const msg = `?NF ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(v ? `${msg} - Variable ${v}` : msg, 'error'); }
+_errorRg()            { const ln = this._getCurrentLineNumber(); const msg = `?RG ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(msg, 'error'); }
+
+// ------------------------------------------------------------------
+//  Utilities
+// ------------------------------------------------------------------
+findLineIndex(lineNumber) {
+    const nums = this._lineNumbers;
+    let left = 0, right = nums.length - 1;
+    while (left <= right) {
+        const mid = (left + right) >> 1;
+        if (nums[mid] === lineNumber) return mid;
+        else if (nums[mid] < lineNumber) left = mid + 1;
+        else right = mid - 1;
+    }
+    return -1;
+}
+
+_sortProgramLines(lines) {
+    return lines.filter(l => l.trim()).map(l => l.trimEnd())
+        .sort((a, b) => {
+            const na = parseFloat(a), nb = parseFloat(b);
+            if (!isNaN(na) && !isNaN(nb)) return na - nb;
+            if (!isNaN(na)) return -1;
+            if (!isNaN(nb)) return 1;
+            return 0;
+        });
+}
+
+// -- UI helpers --
+breakProgram() {
+    if (this.programRunning) {
+        if (this.currentLineIndex < this._lineNumbers.length) {
+            this.printToScreen(`BREAK IN ${this._getCurrentLineNumber()}`);
+        } else {
+            this.printToScreen('BREAK');
+        }
+        this.programRunning = false;
+        this.programPaused  = false;
+        this.waitingForInput = false;
+        this._setStopBtn(false);
+        this.enableImmediateMode();
+        this.canvas.focus();
+    }
+}
+
+stopProgram() {
+    if (this.programRunning) {
+        if (this.programPaused) {
+            this.programPaused = false;
+            this._setStopBtn(true, 'STOP');
+            this.disableImmediateMode();
+            this.executeNextLine();
+        } else {
+            this.programPaused = true;
+            this._setStopBtn(true, 'CONT');
+            this.enableImmediateMode();
+        }
+    } else {
+        this._setStopBtn(false);
+        this.programPaused = false;
+        this.enableImmediateMode();
+    }
+}
+
+stepProgram() {
+    this.stepping = true;
+    if (!this.programRunning) this.runProgram();
+    this.programPaused = false;
+    this.executeNextLine();
+    this.programPaused = true;
+    this._setStopBtn(true, 'CONT');
+    this.stepping = false;
+}
+
+listProgram() {
+    const lines = this._sortProgramLines(this.inputArea.value.trim().split('\n'));
+    this.storedProgram = lines;
+    this.inputArea.value = lines.join('\n');
+    if (lines.length) this.printToScreen(lines.join('\n'));
+}
+
+_clearVariablesBtn() {
+    if (this.programRunning) {
+        this.programRunning = false;
+        this.programPaused  = false;
+        this._setStopBtn(false);
+    }
+    this.scalarVariables = {};
+    this.arrayVariables  = {};
+    this.forLoops = {};
+    this.gosubStack = [];
+    this.dataPointer = 0;
+    this.dataValues  = [];
+    this.lastKeyPressed = null;
+    this.printToScreen('VARIABLES CLEARED');
+}
+
+_newBtn() {
+    if (this.programRunning) {
+        this.programRunning = false;
+        this.programPaused  = false;
+        this._setStopBtn(false);
+    }
+    this.newProgram();
+    this.storedProgram = [];
+    this.inputArea.value = '';
+    this.enableImmediateMode();
+}
+
+_setStopBtn(enabled, text = 'STOP') {
+    const btn = document.getElementById('btnStop');
+    const step = document.getElementById('btnStep');
+    btn.disabled = !enabled;
+    btn.textContent = text;
+    step.disabled = !enabled;
+}
+
+copyScreen() {
+    const text = this.screenContent.map(row => row.join('')).join('\n');
+    navigator.clipboard.writeText(text.trimEnd()).catch(() => {});
+}
+
+_listPreprocessed() {
+    if (this.sortedProgram.length) {
+        this.debugText.value += this.sortedProgram.join('\n') + '\n';
+        this.debugText.scrollTop = this.debugText.scrollHeight;
+    }
+}
+
+_deleteLines(rangeSpec) {
+    const lines = this._sortProgramLines(this.inputArea.value.trim().split('\n'));
+    try {
+        if (rangeSpec.includes('-')) {
+            const [s, e] = rangeSpec.split('-').map(Number);
+            this.storedProgram = lines.filter(l => { const n = parseFloat(l); return n < s || n > e; });
+        } else {
+            const target = parseFloat(rangeSpec);
+            this.storedProgram = lines.filter(l => parseFloat(l) !== target);
+        }
+        this.inputArea.value = this.storedProgram.join('\n');
+        this.printToScreen('DELETED');
+    } catch (e) { this.printToScreen('?SYNTAX ERROR'); }
+}
+
+} // end class TRS80Simulator
+
+// ===================================================================
+//  Boot
+// ===================================================================
+const sim = new TRS80Simulator();
+</script>
+</body>
+</html>

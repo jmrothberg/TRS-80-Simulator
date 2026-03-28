@@ -5,16 +5,29 @@
 
 A desktop simulator for the TRS-80 Model I Level II BASIC, written in Python with a Tkinter GUI.  It runs vintage-style BASIC programs on a green-on-black 64x16 text / 128x48 graphics display and includes a built-in debugger and an optional LLM companion for code help.
 
+The same BASIC interpreter is also available as a **browser-based emulator** in the `web_TRS_80/` folder (single `index.html`).
+
 ![Screen layout](https://img.shields.io/badge/display-64x16_text_%7C_128x48_graphics-green)
 
-## Quick Start
+## Quick Start (desktop — Python)
 
 ```bash
 pip install -r requirements.txt
-python TRS80_March_17_26.py
+python TRS80_March_22_26.py
 ```
 
 Type BASIC lines directly on the green screen (immediate mode) or paste a program into the input area and press **RUN**.
+
+## Web emulator (browser)
+
+| Where | How |
+|-------|-----|
+| **Local** | Open `web_TRS_80/index.html` in a web browser (no server required). |
+| **GitHub Pages** | **[https://jmrothberg.github.io/TRS-80-Simulator/](https://jmrothberg.github.io/TRS-80-Simulator/)** — static site from the `docs/` folder (same app as `web_TRS_80/index.html`). |
+
+**Publishing:** In the repository **Settings → Pages**, set **Source** to **Deploy from a branch**, branch **main**, folder **`/docs`**. The first deploy may take a minute after you push.
+
+When you change the web emulator, keep **`docs/index.html`** in sync with **`web_TRS_80/index.html`** (for example: `cp web_TRS_80/index.html docs/index.html` before committing).
 
 ---
 
@@ -22,7 +35,9 @@ Type BASIC lines directly on the green screen (immediate mode) or paste a progra
 
 | File | Purpose |
 |------|---------|
-| `TRS80_March_17_26.py` | Main simulator — interpreter, UI, screen, debugger (~3,600 lines, single class) |
+| `TRS80_March_22_26.py` | Main simulator — interpreter, UI, screen, debugger (~3,900 lines, single class) |
+| `web_TRS_80/` | **Web port** — TRS-80 BASIC in the browser (`index.html` + plan notes) |
+| `docs/` | Copy of `web_TRS_80/index.html` for **GitHub Pages** (`/` on the Pages site) |
 | `TRS80LLMSupport.py` | Optional AI companion window (Claude API, Ollama, HuggingFace) |
 | `Basic_Code_Examples/` | Sample `.bas` programs: games, tests, demos |
 | `Hailo_for_Pi/` | Hailo-10H AI accelerator support for Raspberry Pi |
