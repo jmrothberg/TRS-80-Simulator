@@ -173,6 +173,7 @@ constructor() {
     // Interpreter state
     this.scalarVariables = {};
     this.arrayVariables  = {};
+    this.userFunctions   = {};
     this.forLoops        = {};
     this.gosubStack      = [];
     this.dataValues      = [];
@@ -925,6 +926,7 @@ processImmediateCommand(command) {
     } else if (cmd === 'CLEAR') {
         this.scalarVariables = {};
         this.arrayVariables  = {};
+        this.userFunctions   = {};
         this.forLoops = {};
         this.gosubStack = [];
         this.dataPointer = 0;
@@ -1130,6 +1132,7 @@ async executeNextLine() {
 newProgram() {
     this.scalarVariables = {};
     this.arrayVariables  = {};
+    this.userFunctions   = {};
     this.forLoops        = {};
     this.currentLineIndex = 0;
     this.waitingForInput = false;
@@ -1186,6 +1189,7 @@ _initCommandHandlers() {
         'STOP':    ()  => this._cmdStop(),
         'END':     ()  => this._cmdEnd(),
         'LOAD':    (c) => this._cmdLoad(c),
+        'DEF':     (c) => this._cmdDef(c),
     };
 }
 
@@ -1418,6 +1422,17 @@ _cmdDim(command) {
             : Array(size + 1).fill(0);
         this._arrayPatterns[arrayName] = new RegExp('\\b' + arrayName.replace('$', '\\$') + '\\(');
         this.debugPrint(`Array ${arrayName} dimensioned with size ${size + 1}`);
+    }
+}
+
+_cmdDef(command) {
+    const m = command.match(/^DEF\s+FN([A-Z])\s*\(\s*([A-Z][A-Z0-9]*\$?)\s*\)\s*=\s*(.+)$/);
+    if (m) {
+        const letter = m[1];
+        const param  = m[2];
+        const body   = m[3];
+        this.userFunctions[letter] = { param, body };
+        if (this.debugMode) this.debugPrint(`DEF FN${letter}(${param}) = ${body}`);
     }
 }
 
@@ -1883,6 +1898,41 @@ _evalNested(expr) {
         } else {
             this.debugPrint(`Unknown function: ${funcName}`, 'error');
             break;
+        }
+    }
+
+    // Stage 4b: User-defined function (DEF FN) dispatch
+    if (expr.includes('FN') && Object.keys(this.userFunctions).length > 0) {
+        const fnRe = /\bFN([A-Z])\s*\(/g;
+        let fnMatch;
+        while ((fnMatch = fnRe.exec(expr)) !== null) {
+            if (isInQuotes(fnMatch.index)) continue;
+            const letter = fnMatch[1];
+            const def = this.userFunctions[letter];
+            if (!def) { this.debugPrint(`Undefined function: FN${letter}`, 'error'); break; }
+            const argStart = fnMatch.index + fnMatch[0].length;
+            let parenCount = 1, argEnd = argStart;
+            for (let i = argStart; i < expr.length; i++) {
+                if (expr[i] === '(') parenCount++;
+                else if (expr[i] === ')') { parenCount--; if (parenCount === 0) { argEnd = i; break; } }
+            }
+            if (parenCount !== 0) break;
+            const argValue = this._evalNested(expr.substring(argStart, argEnd));
+            // Save/restore parameter for local scoping
+            const hadParam = this.scalarVariables.hasOwnProperty(def.param);
+            const savedValue = this.scalarVariables[def.param];
+            this.scalarVariables[def.param] = argValue;
+            let result;
+            try { result = this.evaluateExpression(def.body); }
+            finally {
+                if (hadParam) this.scalarVariables[def.param] = savedValue;
+                else delete this.scalarVariables[def.param];
+            }
+            const sv = String(result);
+            const replacement = (typeof result === 'number' && result < 0) ? `(${sv})` : sv;
+            expr = expr.substring(0, fnMatch.index) + replacement + expr.substring(argEnd + 1);
+            quoteMap = this._buildQuoteMap(expr);
+            fnRe.lastIndex = 0;
         }
     }
 
@@ -2473,6 +2523,7 @@ _clearVariablesBtn() {
     }
     this.scalarVariables = {};
     this.arrayVariables  = {};
+    this.userFunctions   = {};
     this.forLoops = {};
     this.gosubStack = [];
     this.dataPointer = 0;
