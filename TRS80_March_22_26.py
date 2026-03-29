@@ -785,7 +785,8 @@ class TRS80Simulator:
         self.state_text.insert(tk.END, "\nGOSUB STACK\n")
         if self.gosub_stack:
             stack_lines = []
-            for return_index in self.gosub_stack:
+            for entry in self.gosub_stack:
+                return_index = entry[0] if isinstance(entry, tuple) else entry
                 if 0 <= return_index < len(self._line_numbers):
                     stack_lines.append(str(self._line_numbers[return_index]))
                 else:
@@ -914,8 +915,10 @@ class TRS80Simulator:
             return "break"
         
         if self.program_running and event.widget == self.screen:
+            if self.waiting_for_input:
+                pass  # INPUT mode — handle_input_key handles this
             # Only update if no key is currently stored (simulate keyboard buffer)
-            if not self.last_key_pressed and event.char:
+            elif not self.last_key_pressed and event.char:
                 self.last_key_pressed = event.char.upper()
         elif self.immediate_mode and not self.program_running and event.widget == self.screen:
             self.handle_immediate_mode_key(event)
@@ -1257,16 +1260,24 @@ class TRS80Simulator:
         if self.waiting_for_input and event.widget == self.screen:
             if event.keysym == 'BackSpace':
                 self.handle_backspace(event)
-            elif event.char:
+            elif event.keysym in ('Shift_L', 'Shift_R', 'Control_L',
+                    'Control_R', 'Alt_L', 'Alt_R', 'Meta_L', 'Meta_R',
+                    'Caps_Lock', 'Tab', 'Escape'):
+                pass  # Ignore modifier / non-printable keys
+            elif event.keysym == 'space' or event.char:
+                # Explicitly handle space via keysym — on macOS Tkinter,
+                # event.char for space on a Canvas may be empty or unreliable.
+                char = ' ' if event.keysym == 'space' else event.char
                 if self.cursor_row >= 15 and self.cursor_col >= 63:
                     self._scroll_screen_up()
                     self.cursor_col = 0
-                
+
                 x = self.cursor_col * self._char_w
                 y = self.cursor_row * self._char_h
-                self.screen.create_text(x, y, text=event.char.upper(), font=self._screen_font, fill="lime", anchor="nw")
-                
-                self.screen_content[self.cursor_row][self.cursor_col] = event.char.upper()
+                self.screen.create_text(x, y, text=char.upper(), font=self._screen_font, fill="lime", anchor="nw")
+
+                self.screen_content[self.cursor_row][self.cursor_col] = char.upper()
+                self._input_buffer += char.upper()
                 self.cursor_col += 1
                 if self.cursor_col >= 64:
                     self.cursor_row += 1
@@ -1292,14 +1303,16 @@ class TRS80Simulator:
                 if self.cursor_col < 0:
                     self.cursor_row -= 1
                     self.cursor_col = 63
-                
+
                 # Clear the character on the canvas
                 x = self.cursor_col * self._char_w
                 y = self.cursor_row * self._char_h
                 self.screen.create_rectangle(x, y, x + self._char_w, y + self._char_h, fill="black", outline="black")
-                
-                # Update the screen content
+
+                # Update the screen content and input buffer
                 self.screen_content[self.cursor_row][self.cursor_col] = ' '
+                if hasattr(self, '_input_buffer') and self._input_buffer:
+                    self._input_buffer = self._input_buffer[:-1]
                 
                 # Update cursor display after backspace
                 self.update_cursor_display()
@@ -1310,24 +1323,11 @@ class TRS80Simulator:
 
     def handle_input_return(self, event):
         if self.waiting_for_input and event.widget == self.screen:
-            # Construct the user input from screen_content
-            user_input = ''
-            # Check if input_start_pos exists, if not use current position
-            if hasattr(self, 'input_start_pos'):
-                start_row, start_col = map(int, self.input_start_pos.split('.'))
-            else:
-                # If no input was typed, use empty string
-                start_row, start_col = self.cursor_row, self.cursor_col
-            
-            for row in range(start_row, self.cursor_row + 1):
-                if row == start_row:
-                    user_input += ''.join(self.screen_content[row][start_col:])
-                elif row == self.cursor_row:
-                    user_input += ''.join(self.screen_content[row][:self.cursor_col])
-                else:
-                    user_input += ''.join(self.screen_content[row])
+            # Use the input buffer (accumulated from keystrokes) instead of
+            # reading back from screen_content, which can lose spaces.
+            user_input = getattr(self, '_input_buffer', '')
 
-            self.debug_print(f"User input received: {user_input}")  # Debug print
+            self.debug_print(f"User input received: {user_input!r}")  # Debug print
             
             array_match = self._regex_cache['array_match'].match(self.input_variable)
             if array_match:
@@ -1371,6 +1371,7 @@ class TRS80Simulator:
 
             self.waiting_for_input = False
             self.input_variable = None
+            self._input_buffer = ""
             if hasattr(self, 'input_start_pos'):
                 delattr(self, 'input_start_pos')  # Remove the input start position attribute
             self.screen.unbind("<Key>")
@@ -1857,7 +1858,8 @@ class TRS80Simulator:
         
         if self.gosub_stack:
             report.append("  GOSUB Stack (return addresses):")
-            for i, return_line in enumerate(reversed(self.gosub_stack)):
+            for i, entry in enumerate(reversed(self.gosub_stack)):
+                return_line = entry[0] if isinstance(entry, tuple) else entry
                 report.append(f"    Level {i + 1}: Return to line {return_line}")
         else:
             report.append("  No active GOSUB calls")
@@ -2444,6 +2446,7 @@ class TRS80Simulator:
             self.debug_print(f"INPUT {var_name}")
         self.waiting_for_input = True
         self.input_variable = var_name
+        self._input_buffer = ""  # Accumulate typed chars directly
         self.initial_start_pos = f"{self.cursor_row + 1}.{self.cursor_col}"
         self.screen.config(state=tk.NORMAL)
         self.screen.bind("<Key>", self.handle_input_key)
@@ -2490,14 +2493,31 @@ class TRS80Simulator:
                     self.debug_print(f"IF {condition} -> FALSE")
 
     def _execute_multi_statement(self, statements):
-        """Execute colon-separated statements from IF/THEN/ELSE clause."""
+        """Execute colon-separated statements from IF/THEN/ELSE clause.
+
+        Special handling for GOSUB: on a real TRS-80, IF...THEN GOSUB X: Y: Z
+        executes GOSUB X, and when X returns, Y and Z execute before control
+        returns to the next line.  We achieve this by annotating the GOSUB
+        stack entry with the remaining statements so _cmd_return can run them.
+        """
         parts = self._split_on_unquoted_colons(statements)
         result = None
-        for part in parts:
+        for i, part in enumerate(parts):
             part = part.strip()
             if part:
                 result = self.execute_command(part)
                 if result is not None:
+                    # If this was a GOSUB and there are remaining statements,
+                    # attach them to the top gosub_stack entry so _cmd_return
+                    # can execute them after the subroutine finishes.
+                    if (part.strip().upper().startswith('GOSUB')
+                            and i < len(parts) - 1
+                            and self.gosub_stack):
+                        remaining = [p.strip() for p in parts[i+1:] if p.strip()]
+                        if remaining:
+                            top = self.gosub_stack[-1]
+                            idx = top[0] if isinstance(top, tuple) else top
+                            self.gosub_stack[-1] = (idx, remaining)
                     return result
         return result
 
@@ -2571,11 +2591,21 @@ class TRS80Simulator:
 
     def _cmd_return(self, command):
         if self.gosub_stack:
-            return_index = self.gosub_stack.pop()
+            entry = self.gosub_stack.pop()
+            # Unpack: entry is either a plain int or (int, remaining_stmts)
+            if isinstance(entry, tuple):
+                return_index, remaining = entry
+            else:
+                return_index, remaining = entry, None
+            if self.debug_mode:
+                self.debug_print(f"RETURN (depth {len(self.gosub_stack)})")
+            # Execute any remaining statements from IF..THEN GOSUB X: Y: Z
+            if remaining:
+                result = self._execute_multi_statement(':'.join(remaining))
+                if result is not None:
+                    return result
             # Optimization 2: Use pre-parsed _line_numbers
             if return_index < len(self._line_numbers):
-                if self.debug_mode:
-                    self.debug_print(f"RETURN (depth {len(self.gosub_stack)})")
                 return self._line_numbers[return_index]
             return None
         else:
@@ -2894,7 +2924,8 @@ class TRS80Simulator:
         inkey_match = self._regex_cache['inkey'].search(expr)
         if inkey_match and not is_in_quotes(inkey_match.start()):
             inkey_result = self.inkey()
-            expr = expr[:inkey_match.start()] + f"'{inkey_result}'" + expr[inkey_match.end():]
+            safe_inkey = str(inkey_result).replace("'", "\\'")
+            expr = expr[:inkey_match.start()] + f"'{safe_inkey}'" + expr[inkey_match.end():]
             self.replaced = True
             quote_map = self._build_quote_map(expr)
 
@@ -2969,7 +3000,8 @@ class TRS80Simulator:
                         if 0 <= index < len(self.array_variables[array_name]):
                             replacement = self.array_variables[array_name][index]
                             if array_name.endswith('$') or isinstance(replacement, str):
-                                replacement = f"'{replacement}'"
+                                safe = str(replacement).replace("'", "\\'")
+                                replacement = f"'{safe}'"
                             expr = expr[:match.start()] + str(replacement) + expr[end_index + 1:]
                         else:
                             self._error_bs(array_name, index)
@@ -3018,7 +3050,8 @@ class TRS80Simulator:
                         if not (s < len(part_quote_map) and part_quote_map[s]):
                             new_parts.append(parts[i][last_end:s])
                             if var.endswith('$'):
-                                replacement = f"'{str(value).rstrip()}'"
+                                safe = str(value).replace("'", "\\'")
+                                replacement = f"'{safe}'"
                                 if i + 2 < len(parts) and parts[i+1] == '+':
                                     replacement = replacement[:-1]
                             else:
@@ -3084,7 +3117,7 @@ class TRS80Simulator:
             'POINT': self._func_point,
             'LEN': lambda v, ie: len(str(v)),
             'STR$': self._func_str,
-            'CHR$': lambda v, ie: f"'{chr(int(float(v)))}'",
+            'CHR$': lambda v, ie: "'" + chr(int(float(v))).replace("'", "\\'") + "'",
             'STRING$': self._func_string,
             'LEFT$': self._func_left,
             'RIGHT$': self._func_right,
@@ -3108,7 +3141,7 @@ class TRS80Simulator:
             s = str(num)
         if num >= 0:
             s = ' ' + s
-        return f"'{s}'"
+        return "'" + s.replace("'", "\\'") + "'"
 
     def _func_point(self, inner_value, inner_expr):
         try:
@@ -3126,15 +3159,18 @@ class TRS80Simulator:
             char = char[0] if char else ''
         else:
             char = chr(int(char))
-        return f"'{char * count}'"
+        result = char * count
+        return "'" + result.replace("'", "\\'") + "'"
 
     def _func_left(self, inner_value, inner_expr):
         string, length = map(self._eval_nested, inner_expr.split(','))
-        return f"'{str(string)[:int(length)]}'"
+        result = str(string)[:int(length)]
+        return "'" + result.replace("'", "\\'") + "'"
 
     def _func_right(self, inner_value, inner_expr):
         string, length = map(self._eval_nested, inner_expr.split(','))
-        return f"'{str(string)[-int(length):]}'"
+        result = str(string)[-int(length):]
+        return "'" + result.replace("'", "\\'") + "'"
 
     def _func_mid(self, inner_value, inner_expr):
         parts = inner_expr.split(',')
@@ -3142,9 +3178,10 @@ class TRS80Simulator:
         start = int(start) - 1
         if len(parts) > 2:
             length = int(self._eval_nested(parts[2]))
-            return f"'{str(string)[start:start+length]}'"
+            result = str(string)[start:start+length]
         else:
-            return f"'{str(string)[start:]}'"
+            result = str(string)[start:]
+        return "'" + result.replace("'", "\\'") + "'"
 
     def _func_instr(self, inner_value, inner_expr):
         parts = inner_expr.split(',')

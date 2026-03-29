@@ -25,6 +25,8 @@ Type BASIC lines directly on the green screen (immediate mode) or paste a progra
 | **Local** | Open `web_TRS_80/index.html` in a web browser (no server required). |
 | **GitHub Pages** | **[https://jmrothberg.github.io/TRS-80-Simulator/](https://jmrothberg.github.io/TRS-80-Simulator/)** — static site from the `docs/` folder (same app as `web_TRS_80/index.html`). |
 
+The web version has the same BASIC interpreter as the Python version, plus a **Help** button with tabbed reference covering commands, functions, graphics, and a step-by-step guide for playing Scott Adams adventures. Use **Load Tape** to pre-load `.dat` game files before running adventure programs.
+
 **Publishing:** In the repository **Settings → Pages**, set **Source** to **Deploy from a branch**, branch **main**, folder **`/docs`**. The first deploy may take a minute after you push.
 
 When you change the web emulator, keep **`docs/index.html`** in sync with **`web_TRS_80/index.html`** (for example: `cp web_TRS_80/index.html docs/index.html` before committing).
@@ -39,7 +41,8 @@ When you change the web emulator, keep **`docs/index.html`** in sync with **`web
 | `web_TRS_80/` | **Web port** — TRS-80 BASIC in the browser (`index.html` + plan notes) |
 | `docs/` | Copy of `web_TRS_80/index.html` for **GitHub Pages** (`/` on the Pages site) |
 | `TRS80LLMSupport.py` | Optional AI companion window (Claude API, Ollama, HuggingFace) |
-| `Basic_Code_Examples/` | Sample `.bas` programs: games, tests, demos |
+| `Basic_Code_Examples/` | Sample `.bas` programs: games, tests, demos, adventure interpreter |
+| `Game_Data/` | ScottFree `.dat` files for Scott Adams text adventures |
 | `Hailo_for_Pi/` | Hailo-10H AI accelerator support for Raspberry Pi |
 | `TRS80_BASIC_REFERENCE.md` | Language reference for the supported BASIC dialect |
 | `requirements.txt` | Python dependencies |
@@ -242,12 +245,48 @@ See `TRS80_BASIC_REFERENCE.md` for the full language reference.
 
 ---
 
+## Scott Adams Text Adventures
+
+The simulator includes **SCOTTADV.BAS**, a TRS-80 BASIC interpreter that plays all 14 classic Scott Adams adventure games from their original ScottFree `.dat` data files.
+
+### How to play
+
+1. Load `Basic_Code_Examples/SCOTTADV.BAS` (LOAD button in web, or `LOAD` command in Python)
+2. Load the game data using **Load Tape** — select a `.dat` file from `Game_Data/`
+3. Type `RUN` and press Enter when prompted — the adventure begins!
+
+Type two-word commands (`GO NORTH`, `GET AXE`, `OPEN DOOR`) or shortcuts (`N`, `S`, `E`, `W`, `U`, `D`, `I` for inventory, `L` for look).
+
+### Available games
+
+| File | Game |
+|------|------|
+| `adv01.dat` | Adventureland |
+| `adv02.dat` | Pirate Adventure |
+| `adv03.dat` | Mission Impossible |
+| `adv04.dat` | Voodoo Castle |
+| `adv05.dat` | The Count |
+| `adv06.dat` | Strange Odyssey |
+| `adv07.dat` | Mystery Fun House |
+| `adv08.dat` | Pyramid of Doom |
+| `adv09.dat` | Ghost Town |
+| `adv10.dat` | Savage Island Part 1 |
+| `adv11.dat` | Savage Island Part 2 |
+| `adv12.dat` | Golden Voyage |
+| `adv13.dat` | Sorcerer of Claymorgue Castle |
+| `adv14a.dat` | Return to Pirate's Isle |
+
+The interpreter reads the standard ScottFree ASCII `.dat` format via tape I/O (`INPUT#-1`). Additional `.dat` files can be downloaded from the [ScottFree archive](https://www.ifarchive.org/indexes/if-archive/scott-adams/).
+
+---
+
 ## Example Programs
 
 The `Basic_Code_Examples/` directory contains:
 
 | File | Description |
 |------|-------------|
+| `SCOTTADV.BAS` | Scott Adams adventure interpreter (reads `.dat` game files) |
 | `Invaders_V.bas` / `Invaders_VI.bas` | Space Invaders variants |
 | `asteroid.bas` | Space shooter |
 | `Snake.bas` | Snake game |

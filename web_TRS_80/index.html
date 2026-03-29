@@ -17,12 +17,42 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 #buttonBar button:hover { background: #555; }
 #buttonBar button:disabled { opacity: 0.4; cursor: default; }
 #buttonBar button:disabled:hover { background: #444; }
+/* INSERT TAPE button: pulses amber when program is waiting for tape data */
+#btnTape.tape-waiting {
+    background: #7a4400;
+    color: #ffcc44;
+    border-color: #ffaa00;
+    animation: tapeWait 0.8s ease-in-out infinite alternate;
+}
+@keyframes tapeWait {
+    from { background: #7a4400; box-shadow: 0 0 4px #ff8800; }
+    to   { background: #aa6600; box-shadow: 0 0 12px #ffaa00; }
+}
 #debugPanel { background: #1a1a1a; border: 1px solid #555; border-radius: 4px; padding: 6px; margin-top: 6px; }
 #debugPanel h3 { color: #aaa; font-size: 13px; margin-bottom: 4px; cursor: pointer; }
 #debugText { width: 100%; height: 150px; background: #111; color: #aaa; border: 1px solid #444; font-family: 'Courier New', monospace; font-size: 11px; padding: 4px; resize: vertical; }
 #debugBar { display: flex; gap: 4px; margin-bottom: 4px; }
 #debugBar button { background: #383838; color: #bbb; border: 1px solid #555; padding: 2px 8px; font-size: 11px; cursor: pointer; border-radius: 2px; }
 #fileInput { display: none; }
+#tapeInput { display: none; }
+/* Help overlay */
+#helpOverlay {
+    display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    background: rgba(0,0,0,0.7); z-index: 1000; justify-content: center; align-items: center;
+}
+#helpOverlay.show { display: flex; }
+#helpBox {
+    background: #1a1a1a; border: 2px solid #7f7; border-radius: 8px;
+    max-width: 700px; width: 90%; max-height: 80vh; display: flex; flex-direction: column;
+    box-shadow: 0 0 30px rgba(0,255,0,0.2);
+}
+#helpBox h2 { color: #7f7; font-family: 'Courier New', monospace; font-size: 16px; padding: 12px 16px 8px; border-bottom: 1px solid #444; }
+#helpTabs { display: flex; gap: 2px; padding: 6px 12px; background: #222; border-bottom: 1px solid #444; flex-wrap: wrap; }
+#helpTabs button { background: #333; color: #aaa; border: 1px solid #555; padding: 4px 10px; font-size: 11px; cursor: pointer; border-radius: 3px; }
+#helpTabs button.active { background: #2a5a2a; color: #7f7; border-color: #7f7; }
+#helpContent { padding: 12px 16px; overflow-y: auto; color: #ccc; font-family: 'Courier New', monospace; font-size: 12px; line-height: 1.5; white-space: pre-wrap; flex: 1; }
+#helpClose { background: #444; color: #ddd; border: 1px solid #666; padding: 6px 20px; font-size: 12px; cursor: pointer; border-radius: 3px; margin: 8px 16px 12px; align-self: flex-end; }
+#helpClose:hover { background: #555; }
 </style>
 </head>
 <body>
@@ -41,8 +71,10 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 <button id="btnNew">NEW</button>
 <button id="btnSave">SAVE</button>
 <button id="btnLoad">LOAD</button>
+<button id="btnTape">Load Tape</button>
 <button id="btnCopy">Copy</button>
 <button id="btnDebug">Debug: ON</button>
+<button id="btnHelp">Help</button>
 </div>
 <div id="debugPanel" style="display:none">
 <div id="debugBar">
@@ -52,7 +84,22 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 <textarea id="debugText" readonly></textarea>
 </div>
 </div>
+<div id="helpOverlay">
+<div id="helpBox">
+<h2>TRS-80 BASIC Simulator Help</h2>
+<div id="helpTabs">
+<button class="active" data-tab="0">Quick Start</button>
+<button data-tab="1">Commands</button>
+<button data-tab="2">Functions</button>
+<button data-tab="3">Graphics &amp; Memory</button>
+<button data-tab="4">Adventures</button>
+</div>
+<div id="helpContent"></div>
+<button id="helpClose">Close</button>
+</div>
+</div>
 <input type="file" id="fileInput" accept=".bas,.txt">
+<input type="file" id="tapeInput" accept=".dat,.txt,.csv,.bas">
 
 <script>
 // ===================================================================
@@ -153,8 +200,9 @@ constructor() {
     this._lastEvalOriginal    = '';
     this._lastEvalSubstituted = '';
 
-    this.tapeData    = [];
-    this.tapePointer = 0;
+    this.tapeData       = [];
+    this.tapePointer    = 0;
+    this.waitingForTape = false;  // true when program paused waiting for tape INSERT
 
     // Input handling state
     this.inputStartRow = 0;
@@ -230,13 +278,230 @@ _wireButtons() {
     document.getElementById('btnNew').onclick   = () => this._newBtn();
     document.getElementById('btnSave').onclick  = () => this.saveProgram();
     document.getElementById('btnLoad').onclick  = () => this._triggerLoad();
+    document.getElementById('btnTape').onclick  = () => this._triggerTapeLoad();
     document.getElementById('btnCopy').onclick  = () => this.copyScreen();
     document.getElementById('btnDebug').onclick = () => this.toggleDebug();
     document.getElementById('btnDebugClear').onclick = () => { this.debugText.value = ''; };
     document.getElementById('btnDebugList').onclick  = () => this._listPreprocessed();
+    document.getElementById('btnHelp').onclick       = () => this._showHelp();
+    document.getElementById('helpClose').onclick     = () => this._hideHelp();
+
+    // Help tab switching
+    document.getElementById('helpTabs').addEventListener('click', (e) => {
+        if (e.target.dataset.tab !== undefined) {
+            document.querySelectorAll('#helpTabs button').forEach(b => b.classList.remove('active'));
+            e.target.classList.add('active');
+            document.getElementById('helpContent').textContent = this._helpTexts[Number(e.target.dataset.tab)];
+        }
+    });
+    // Close help on overlay background click
+    document.getElementById('helpOverlay').addEventListener('click', (e) => {
+        if (e.target.id === 'helpOverlay') this._hideHelp();
+    });
 
     document.getElementById('fileInput').addEventListener('change', (e) => this._handleFileLoad(e));
+    document.getElementById('tapeInput').addEventListener('change', (e) => this._handleTapeFileLoad(e));
 }
+
+// ------------------------------------------------------------------
+//  Help System
+// ------------------------------------------------------------------
+_showHelp() {
+    document.getElementById('helpContent').textContent = this._helpTexts[0];
+    document.getElementById('helpOverlay').classList.add('show');
+}
+_hideHelp() {
+    document.getElementById('helpOverlay').classList.remove('show');
+    this.screen.focus();
+}
+
+get _helpTexts() { return [
+// Tab 0: Quick Start
+`QUICK START
+============
+
+1. Type BASIC lines on the green screen (immediate mode)
+   or paste a program into the text area below it.
+
+2. Click RUN (or type RUN on the green screen).
+
+3. Press ESC or click STOP to halt a running program.
+
+LOADING PROGRAMS
+  Click LOAD and select a .bas file to load a program.
+  The program appears in the text area — click RUN.
+
+LOADING TAPE DATA (for adventure games, etc.)
+  Some BASIC programs read data from "tape" (INPUT#-1).
+  There are two ways to load tape data:
+
+  METHOD 1 — Pre-load (recommended):
+    1. Click "Load Tape" and select the .dat file
+    2. The screen shows "TAPE LOADED: filename"
+    3. Now RUN your program — data loads instantly
+
+  METHOD 2 — On-demand:
+    1. RUN the program first
+    2. When it needs tape data, you'll see "INSERT TAPE"
+       and the Load Tape button pulses amber
+    3. Click "Load Tape" and select the file
+    4. The program resumes automatically
+
+KEYBOARD
+  ESC or Ctrl+C .. BREAK (stop program)
+  Enter .......... Submit input / execute command
+  Click screen ... Refocus for keyboard input`,
+
+// Tab 1: Commands
+`COMMANDS & SYNTAX
+==================
+
+Immediate Mode (type on green screen):
+  RUN ............. Run the program
+  LIST [n[-m]] .... List program lines
+  NEW ............. Clear program memory
+  CLEAR ........... Clear variables
+  CONT ............ Continue after STOP
+  LOAD ............ Load .bas file
+  SAVE ............ Save program to file
+  CLS ............. Clear screen
+  DELETE n[-m] .... Delete line(s)
+
+Program Statements:
+  PRINT expr [;|,] expr ...
+  PRINT@ pos, expr    (screen position 0-1023)
+  PRINT TAB(n); expr
+  LET var = expr      (LET is optional)
+  INPUT ["prompt";] var
+  GOTO line
+  ON expr GOTO line1, line2, ...
+  IF cond THEN action [ELSE action]
+  FOR var = start TO end [STEP s]
+  NEXT [var]
+  GOSUB line / RETURN
+  DIM var(size)
+  DATA val1, val2 ... / READ var / RESTORE
+  REM comment
+  STOP / END
+  PRINT#-1, expr      (write to tape)
+  INPUT#-1, var        (read from tape)
+
+Notes:
+  - Every line needs a line number
+  - Keywords must be UPPERCASE
+  - Multiple statements per line with :
+    10 A=1: B=2: PRINT A+B
+  - Comparisons return -1 (true) or 0 (false)`,
+
+// Tab 2: Functions
+`FUNCTIONS & OPERATORS
+======================
+
+Math Functions:
+  ABS(x) ......... Absolute value
+  INT(x) ......... Integer part (floor)
+  FIX(x) ......... Truncate toward zero
+  SGN(x) ......... Sign (-1, 0, or 1)
+  SQR(x) ......... Square root
+  SIN(x), COS(x), TAN(x)  (radians)
+  EXP(x) ......... e^x
+  LOG(x) ......... Natural log
+  RND ............ Random 0.0–0.999
+  RND(n) ......... Random integer 1–n
+  RND(0) ......... New random float
+
+String Functions:
+  LEN(s$) ........ Length
+  LEFT$(s$,n) .... First n chars
+  RIGHT$(s$,n) ... Last n chars
+  MID$(s$,p[,n]) . Substring (1-based)
+  STR$(n) ........ Number to string
+  VAL(s$) ........ String to number
+  CHR$(n) ........ ASCII code to char
+  ASC(s$) ........ Char to ASCII code
+  STRING$(n,c) ... Repeat character
+  INSTR([p,]s$,f$) Find substring
+  INKEY$ ......... Get keypress (non-blocking)
+
+Operators:
+  + - * / ^ (power) MOD
+  = <> < > <= >=
+  AND  OR  NOT
+  + (string concatenation)`,
+
+// Tab 3: Graphics & Memory
+`GRAPHICS & MEMORY
+===================
+
+Graphics (128 x 48 pixel overlay):
+  SET(x,y) ....... Turn on pixel
+  RESET(x,y) ..... Turn off pixel
+  POINT(x,y) ..... Read pixel (0 or 1)
+  x: 0–127, y: 0–47
+
+Screen Memory:
+  PEEK(addr) ..... Read memory byte
+  POKE addr,val .. Write memory byte
+  Screen: 15360–16383 (64x16 chars)
+  Keyboard: PEEK(14400) for polling
+
+Text Screen:
+  64 columns x 16 rows
+  Each text cell = 2x3 graphics pixels
+  PRINT@ position (0–1023)
+
+Variables:
+  A–Z, A0–Z9      (numeric)
+  A$–Z$, A0$–Z9$  (string)
+  Arrays: DIM A(10) creates 11 elements (0–10)
+
+Special:
+  STR$(n) includes leading space for sign
+  PRINT ; = no space, , = tab to column 16`,
+
+// Tab 4: Adventures
+`SCOTT ADAMS ADVENTURE GAMES
+==============================
+
+The simulator can run Scott Adams text adventures
+using the SCOTTADV.BAS interpreter program.
+
+SETUP:
+  1. Click LOAD → select SCOTTADV.BAS
+  2. Click "Load Tape" → select a .dat game file
+     (e.g., adv01.dat = Adventureland)
+  3. Click RUN
+  4. Press Enter when prompted — the game loads!
+
+PLAYING:
+  Type two-word commands: verb + noun
+    GO NORTH, GET AXE, OPEN DOOR, LOOK, etc.
+
+  Movement shortcuts: N, S, E, W, U, D
+  Special commands:
+    I ............ Inventory
+    L ............ Look around
+    SCORE ........ Check your score
+
+  Collect treasures (items with * in name)
+  and bring them to the treasure room to score.
+
+AVAILABLE GAMES (ScottFree .dat format):
+  adv01.dat ... Adventureland
+  adv02.dat ... Pirate Adventure
+  adv03.dat ... Mission Impossible
+  adv04.dat ... Voodoo Castle
+  adv05.dat ... The Count
+  adv06.dat ... Strange Odyssey
+  adv07.dat ... Mystery Fun House
+  adv08.dat ... Pyramid of Doom
+  adv09.dat ... Ghost Town
+  adv10.dat ... Savage Island Part 1
+  adv11.dat ... Savage Island Part 2
+  adv12.dat ... Golden Voyage
+  adv13.dat ... Sorcerer of Claymorgue
+  adv14a.dat .. Return to Pirate's Isle`
+]; }
 
 // ------------------------------------------------------------------
 //  Screen Rendering
@@ -1157,11 +1422,26 @@ _cmdIf(command) {
 _executeMultiStatement(statements) {
     const parts = this._splitOnUnquotedColons(statements);
     let result;
-    for (const part of parts) {
-        const trimmed = part.trim();
+    for (let i = 0; i < parts.length; i++) {
+        const trimmed = parts[i].trim();
         if (trimmed) {
             result = this.executeCommand(trimmed);
-            if (typeof result === 'number') return result;
+            if (typeof result === 'number') {
+                // If this was a GOSUB and there are remaining statements,
+                // attach them to the top gosub stack entry so _cmdReturn
+                // can execute them after the subroutine finishes.
+                if (trimmed.toUpperCase().startsWith('GOSUB')
+                        && i < parts.length - 1
+                        && this.gosubStack.length > 0) {
+                    const remaining = parts.slice(i + 1).map(p => p.trim()).filter(p => p);
+                    if (remaining.length > 0) {
+                        const top = this.gosubStack[this.gosubStack.length - 1];
+                        const idx = (typeof top === 'object' && top !== null) ? top.idx : top;
+                        this.gosubStack[this.gosubStack.length - 1] = { idx, remaining };
+                    }
+                }
+                return result;
+            }
         }
     }
     return result;
@@ -1233,7 +1513,21 @@ _cmdGosub(command) {
 
 _cmdReturn() {
     if (this.gosubStack.length > 0) {
-        const returnIndex = this.gosubStack.pop();
+        const entry = this.gosubStack.pop();
+        // Unpack: entry is either a plain number or {idx, remaining}
+        let returnIndex, remaining;
+        if (typeof entry === 'object' && entry !== null) {
+            returnIndex = entry.idx;
+            remaining = entry.remaining;
+        } else {
+            returnIndex = entry;
+            remaining = null;
+        }
+        // Execute any remaining statements from IF..THEN GOSUB X: Y: Z
+        if (remaining && remaining.length > 0) {
+            const result = this._executeMultiStatement(remaining.join(':'));
+            if (typeof result === 'number') return result;
+        }
         if (returnIndex < this._lineNumbers.length) return this._lineNumbers[returnIndex];
     } else { this._errorRg(); }
 }
@@ -1296,14 +1590,67 @@ _cmdInputTape(command) {
     const varName = command.split(',')[1].trim();
     if (this.tapePointer < this.tapeData.length) {
         this.scalarVariables[varName] = this.tapeData[this.tapePointer++];
+        this.debugPrint(`Tape read: ${varName} = ${this.scalarVariables[varName]}`);
     } else {
-        this.debugPrint('Error: No more data on tape');
+        // No tape loaded — pause execution and prompt the user to insert tape.
+        // Step back so this same INPUT#-1 line re-executes after tape is loaded.
+        this.currentLineIndex--;
+        this.waitingForTape = true;
+        this.programPaused  = true;
+        this._setTapeButtonWaiting(true);
+        this.printToScreen('INSERT TAPE');
+        this.debugPrint('Program paused: waiting for tape data file');
     }
 }
 
 _cmdPrintTape(command) {
     const data = this.evaluateExpression(command.split(',').slice(1).join(',').trim());
     this.tapeData.push(String(data));
+}
+
+// Light up / dim the Insert-Tape button
+_setTapeButtonWaiting(on) {
+    const btn = document.getElementById('btnTape');
+    if (on) {
+        btn.textContent = '⬤ INSERT TAPE';
+        btn.classList.add('tape-waiting');
+    } else {
+        btn.textContent = 'Load Tape';
+        btn.classList.remove('tape-waiting');
+    }
+}
+
+// User clicked "Load Tape" / "INSERT TAPE" button
+_triggerTapeLoad() {
+    document.getElementById('tapeInput').click();
+}
+
+// Called when user picks a data file; if program was paused waiting, resume it
+_handleTapeFileLoad(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (e) => {
+        // Parse each non-empty line as a tape value (same format as Python tape)
+        const lines = e.target.result.split('\n').map(l => l.trim()).filter(l => l !== '');
+        // Replace remaining tape from current pointer onward with new data
+        this.tapeData    = lines;
+        this.tapePointer = 0;
+        this.printToScreen(`TAPE LOADED: ${file.name} (${lines.length} records)`);
+        this.debugPrint(`Tape loaded: ${file.name}, ${lines.length} records`);
+
+        if (this.waitingForTape) {
+            // Program was paused waiting for tape — resume it now
+            this.waitingForTape = false;
+            this.programPaused  = false;
+            this._setTapeButtonWaiting(false);
+            setTimeout(() => this.executeNextLine(), 50);
+        }
+        // Re-focus the canvas so keyboard input works immediately
+        setTimeout(() => this.screen.focus(), 100);
+    };
+    reader.readAsText(file);
+    event.target.value = '';
 }
 
 // ------------------------------------------------------------------
@@ -1416,7 +1763,7 @@ _evalNested(expr) {
                 if (index >= 0 && index < this.arrayVariables[arrayName].length) {
                     let replacement = this.arrayVariables[arrayName][index];
                     if (arrayName.endsWith('$') || typeof replacement === 'string')
-                        replacement = `'${replacement}'`;
+                        replacement = `'${String(replacement).replace(/'/g, "\\'")}'`;
                     expr = expr.substring(0, m.index) + String(replacement) + expr.substring(endIndex + 1);
                     searchStart = m.index + String(replacement).length;
                 } else {
@@ -1464,7 +1811,8 @@ _evalNested(expr) {
                     if (!(s < partQuoteMap.length && partQuoteMap[s])) {
                         newParts.push(parts[pi].substring(lastEnd, s));
                         if (varName.endsWith('$')) {
-                            newParts.push(`'${String(value).trimEnd()}'`);
+                            const safe = String(value).replace(/'/g, "\\'");
+                            newParts.push(`'${safe}'`);
                         } else {
                             newParts.push(String(value));
                         }
@@ -1616,12 +1964,12 @@ _initBuiltinFunctions() {
         'SGN':     (v) => { const n = Number(v); return n < 0 ? -1 : (n > 0 ? 1 : 0); },
         'ABS':     (v) => Math.abs(Number(v)),
         'FIX':     (v) => Math.trunc(Number(v)),
-        'VAL':     (v) => { const s = String(v).replace(/^['"]|['"]$/g, ''); const n = parseFloat(s); return isNaN(n) ? 0 : (n === Math.trunc(n) ? Math.trunc(n) : n); },
+        'VAL':     (v) => { const s = String(v); const n = parseFloat(s); return isNaN(n) ? 0 : (n === Math.trunc(n) ? Math.trunc(n) : n); },
         'RND':     (v, ie) => this._funcRnd(v),
-        'ASC':     (v) => String(v).replace(/^['"]|['"]$/g, '').charCodeAt(0) || 0,
+        'ASC':     (v) => String(v).charCodeAt(0) || 0,
         'PEEK':    (v) => this.peek(Math.trunc(Number(v))),
         'POINT':   (v, ie) => this._funcPoint(ie),
-        'LEN':     (v) => String(v).replace(/^['"]|['"]$/g, '').length,
+        'LEN':     (v) => String(v).length,
         'STR$':    (v) => this._funcStr(v),
         'CHR$':    (v) => "'" + String.fromCharCode(Math.trunc(Number(v))).replace(/'/g, "\\'") + "'",
         'STRING$': (v, ie) => this._funcString(ie),
@@ -1660,27 +2008,27 @@ _funcString(innerExpr) {
     const count = Math.trunc(this._evalNested(parts[0].trim()));
     let char = this._evalNested(parts[1].trim());
     if (typeof char === 'number') char = String.fromCharCode(char);
-    else char = String(char).replace(/^['"]|['"]$/g, '')[0] || '';
+    else char = String(char)[0] || '';
     return "'" + char.repeat(count).replace(/'/g, "\\'") + "'";
 }
 
 _funcLeft(innerExpr) {
     const parts = innerExpr.split(',');
-    const str = String(this._evalNested(parts[0].trim())).replace(/^['"]|['"]$/g, '');
+    const str = String(this._evalNested(parts[0].trim()));
     const len = Math.trunc(this._evalNested(parts[1].trim()));
     return "'" + str.substring(0, len).replace(/'/g, "\\'") + "'";
 }
 
 _funcRight(innerExpr) {
     const parts = innerExpr.split(',');
-    const str = String(this._evalNested(parts[0].trim())).replace(/^['"]|['"]$/g, '');
+    const str = String(this._evalNested(parts[0].trim()));
     const len = Math.trunc(this._evalNested(parts[1].trim()));
     return "'" + str.slice(-len).replace(/'/g, "\\'") + "'";
 }
 
 _funcMid(innerExpr) {
     const parts = innerExpr.split(',');
-    const str   = String(this._evalNested(parts[0].trim())).replace(/^['"]|['"]$/g, '');
+    const str   = String(this._evalNested(parts[0].trim()));
     const start = Math.trunc(this._evalNested(parts[1].trim())) - 1;
     if (parts.length > 2) {
         const len = Math.trunc(this._evalNested(parts[2].trim()));
@@ -1693,12 +2041,12 @@ _funcInstr(innerExpr) {
     const parts = innerExpr.split(',');
     let startPos = 1, str, find;
     if (parts.length === 2) {
-        str  = String(this._evalNested(parts[0].trim())).replace(/^['"]|['"]$/g, '');
-        find = String(this._evalNested(parts[1].trim())).replace(/^['"]|['"]$/g, '');
+        str  = String(this._evalNested(parts[0].trim()));
+        find = String(this._evalNested(parts[1].trim()));
     } else if (parts.length >= 3) {
         startPos = Math.trunc(this._evalNested(parts[0].trim()));
-        str  = String(this._evalNested(parts[1].trim())).replace(/^['"]|['"]$/g, '');
-        find = String(this._evalNested(parts[2].trim())).replace(/^['"]|['"]$/g, '');
+        str  = String(this._evalNested(parts[1].trim()));
+        find = String(this._evalNested(parts[2].trim()));
     } else return 0;
     const idx = str.indexOf(find, startPos - 1);
     return idx === -1 ? 0 : idx + 1;
@@ -1817,6 +2165,8 @@ _handleFileLoad(event) {
         } else {
             this.enableImmediateMode();
         }
+        // Re-focus the canvas so keyboard input works immediately
+        setTimeout(() => this.screen.focus(), 100);
     };
     reader.readAsText(file);
     event.target.value = '';
@@ -1908,6 +2258,13 @@ breakProgram() {
 stopProgram() {
     if (this.programRunning) {
         if (this.programPaused) {
+            // If we were waiting for tape, cancel that wait
+            if (this.waitingForTape) {
+                this.waitingForTape = false;
+                this._setTapeButtonWaiting(false);
+                // Advance past the INPUT#-1 line so we don't retry it
+                this.currentLineIndex++;
+            }
             this.programPaused = false;
             this._setStopBtn(true, 'STOP');
             this.disableImmediateMode();
