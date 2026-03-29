@@ -240,6 +240,7 @@ class TRS80Simulator:
         # Initialize variables first (needed for cursor display)
         self.scalar_variables = {}
         self.array_variables = {}
+        self.user_functions = {}
         self.current_line_index = 0
         self.program_running = False
         self.program_paused = False
@@ -475,7 +476,7 @@ class TRS80Simulator:
         self._regex_cache['poke'] = re.compile(r'POKE\s+(.+?)\s*,\s*(.+)')
         self._regex_cache['set_reset'] = re.compile(r'(SET|RESET)\s*\(\s*((?:[^(),]+|\([^()]*\))*)\s*,\s*((?:[^(),]+|\([^()]*\))*)\s*\)')
         self._regex_cache['tab'] = re.compile(r'TAB\((\d+)\)')
-        self._regex_cache['func_match'] = re.compile(r'(INT|SIN|COS|TAN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(((?:[^()]+|\([^()]*\))*)\)')
+        self._regex_cache['func_match'] = re.compile(r'(INT|SIN|COS|TAN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(')
         self._regex_cache['quotes'] = re.compile(r'(?<!\\)"')
         self._regex_cache['quotes_single'] = re.compile(r"(?<!\\)'")
         self._regex_cache['string_split'] = re.compile(r"""("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')""")
@@ -1094,6 +1095,7 @@ class TRS80Simulator:
             self.stop_button.config(text="DISABLED", state=tk.DISABLED)
         self.scalar_variables = {}
         self.array_variables = {}
+        self.user_functions = {}
         self.for_loops = {}
         self.gosub_stack = []
         self.data_pointer = 0
@@ -1136,6 +1138,7 @@ class TRS80Simulator:
         """
         self.scalar_variables = {}
         self.array_variables = {}
+        self.user_functions = {}
         self.for_loops = {}
         self.current_line_index = 0
         self.waiting_for_input = False
@@ -1691,8 +1694,9 @@ class TRS80Simulator:
                     if new_index != -1:
                         self.current_line_index = new_index
                     else:
-                        self.debug_print(f"Warning: Line number {result} not found")
-                        self.current_line_index += 1
+                        self._error_ul(result)
+                        self.program_running = False
+                        return
                 elif self.waiting_for_input:
                     # Flush graphics before waiting for input
                     self._flush_graphics()
@@ -2174,6 +2178,7 @@ class TRS80Simulator:
             'RESTORE': self._cmd_restore,
             'STOP': self._cmd_stop,
             'END': self._cmd_end,
+            'DEF': self._cmd_def,
         }
 
     def execute_command(self, command, cmd_word=None):
@@ -2194,6 +2199,10 @@ class TRS80Simulator:
             self._last_debug_command = original_command
 
         try:
+            # Bare line number = implicit GOTO
+            if command.strip().isdigit():
+                return int(command.strip())
+
             # Handle tape I/O commands specially (before dispatch table)
             if command.startswith('INPUT#-1'):
                 return self._cmd_input_tape(command)
@@ -2481,12 +2490,18 @@ class TRS80Simulator:
             condition, then_action, _, else_action = match.groups()
             condition_result = self.evaluate_expression(condition)
             if condition_result:
+                trimmed = then_action.strip()
                 if self.debug_mode:
                     self.debug_print(f"IF {condition} -> TRUE; THEN {then_action}")
+                if trimmed.isdigit():
+                    return int(trimmed)
                 return self._execute_multi_statement(then_action)
             elif else_action:
+                trimmed_else = else_action.strip()
                 if self.debug_mode:
                     self.debug_print(f"IF {condition} -> FALSE; ELSE {else_action}")
+                if trimmed_else.isdigit():
+                    return int(trimmed_else)
                 return self._execute_multi_statement(else_action)
             else:
                 if self.debug_mode:
@@ -2654,6 +2669,18 @@ class TRS80Simulator:
         self.data_pointer = 0
         self.debug_print("RESTORE: Data pointer reset to 0")
 
+    def _cmd_def(self, command):
+        """DEF FNx(var) = expression"""
+        import re as _re
+        m = _re.match(r'^DEF\s+FN([A-Z])\s*\(\s*([A-Z][A-Z0-9]*\$?)\s*\)\s*=\s*(.+)$', command)
+        if m:
+            letter = m.group(1)
+            param = m.group(2)
+            body = m.group(3)
+            self.user_functions[letter] = {'param': param, 'body': body}
+            if self.debug_mode:
+                self.debug_print(f"DEF FN{letter}({param}) = {body}")
+
     def _cmd_stop(self, command):
         line_number = self._get_current_line_number()
         self.print_to_screen(f"BREAK IN {line_number}")
@@ -2779,13 +2806,16 @@ class TRS80Simulator:
 
     def _find_comp_op(self, expr, op_str):
         """Find first comparison operator not inside quotes."""
-        in_quote = False
+        in_double = False
+        in_single = False
         op_len = len(op_str)
         i = 0
         while i <= len(expr) - op_len:
-            if expr[i] == '"':
-                in_quote = not in_quote
-            elif not in_quote and expr[i:i + op_len] == op_str:
+            if expr[i] == '"' and not in_single:
+                in_double = not in_double
+            elif expr[i] == "'" and not in_double:
+                in_single = not in_single
+            elif not in_double and not in_single and expr[i:i + op_len] == op_str:
                 # Don't match > if part of >=
                 if op_str == '>' and i + 1 < len(expr) and expr[i + 1] == '=':
                     i += 2
@@ -2941,16 +2971,32 @@ class TRS80Simulator:
         if expr is not prev:
             quote_map = self._build_quote_map(expr)
 
-        # --- Stage 4: Built-in function dispatch ---
+        # --- Stage 4: Built-in function dispatch (paren-counting for arbitrary depth) ---
         while True:
             func_match = self._regex_cache['func_match'].search(expr)
             if not func_match:
                 break
 
-            func_name, inner_expr = func_match.groups()
+            func_name = func_match.group(1)
 
             if is_in_quotes(func_match.start()):
                 break
+
+            # Find matching close paren via counting (handles any nesting depth)
+            arg_start = func_match.end()
+            depth = 1
+            arg_end = arg_start
+            for ci in range(arg_start, len(expr)):
+                if expr[ci] == '(':
+                    depth += 1
+                elif expr[ci] == ')':
+                    depth -= 1
+                    if depth == 0:
+                        arg_end = ci
+                        break
+            if depth != 0:
+                break
+            inner_expr = expr[arg_start:arg_end]
 
             # Evaluate inner expression first
             inner_value = self._eval_nested(inner_expr)
@@ -2963,8 +3009,45 @@ class TRS80Simulator:
                 self.debug_print(f"Unknown function: {func_name}", 'error')
                 break
 
-            expr = expr.replace(func_match.group(), str(result), 1)
+            expr = expr[:func_match.start()] + str(result) + expr[arg_end + 1:]
             quote_map = self._build_quote_map(expr)
+
+        # --- Stage 4b: User-defined FN calls ---
+        if 'FN' in expr and self.user_functions:
+            fn_re = re.compile(r'FN([A-Z])\(')
+            while True:
+                fn_match = fn_re.search(expr)
+                if not fn_match:
+                    break
+                letter = fn_match.group(1)
+                if letter not in self.user_functions:
+                    break
+                defn = self.user_functions[letter]
+                # Find matching closing paren
+                start_idx = fn_match.end()
+                depth = 1
+                end_idx = start_idx
+                for ci, ch in enumerate(expr[start_idx:], start=start_idx):
+                    if ch == '(':
+                        depth += 1
+                    elif ch == ')':
+                        depth -= 1
+                        if depth == 0:
+                            end_idx = ci
+                            break
+                arg_expr = expr[start_idx:end_idx]
+                arg_val = self._eval_nested(arg_expr)
+                # Save, set, evaluate, restore parameter
+                param = defn['param']
+                saved = self.scalar_variables.get(param)
+                self.scalar_variables[param] = arg_val
+                result = self._eval_nested(defn['body'])
+                if saved is not None:
+                    self.scalar_variables[param] = saved
+                elif param in self.scalar_variables:
+                    del self.scalar_variables[param]
+                expr = expr[:fn_match.start()] + str(result) + expr[end_idx + 1:]
+                quote_map = self._build_quote_map(expr)
 
         # --- Stage 5: Array reference substitution ---
         # Matches "A(" patterns, recursively evaluates the index expression,
@@ -3128,11 +3211,12 @@ class TRS80Simulator:
         }
 
     def _func_rnd(self, inner_value, inner_expr):
-        """RND(n): TRS-80 returns 1 to n for positive n, random float for 0"""
-        n = int(inner_value)
+        """RND(n): TRS-80 Level II returns random float in [0,1) for n>0, last value for n=0"""
+        n = float(inner_value)
         if n == 0:
-            return random.random()
-        return random.randint(1, n)
+            return getattr(self, '_last_rnd', random.random())
+        self._last_rnd = random.random()
+        return self._last_rnd
 
     def _func_str(self, inner_value, inner_expr):
         """STR$(n): TRS-80 adds leading space for non-negative numbers"""

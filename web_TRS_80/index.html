@@ -60,7 +60,7 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 </head>
 <body>
 <div id="container">
-<h1>JMR's TRS-80 Simulator v1.0</h1>
+<h1>JMR's TRS-80 Simulator v1.1</h1>
 <div id="screenFrame">
 <canvas id="screen" width="768" height="288" tabindex="0"></canvas>
 <!-- Hidden input to trigger virtual keyboard on mobile/tablet -->
@@ -286,7 +286,7 @@ _compileRegexPatterns() {
     this._re.dim          = /^DIM\s+(\w+\$?)\((.+)\)$/;
     this._re.poke         = /^POKE\s+(.+?)\s*,\s*(.+)/;
     this._re.tab          = /TAB\((\d+)\)/;
-    this._re.funcMatch    = /(INT|SIN|COS|TAN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(((?:[^()]+|\([^()]*\))*)\)/;
+    this._re.funcMatch    = /(INT|SIN|COS|TAN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(/;
     this._re.stringSplit  = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/;
     this._re.inkey        = /\bINKEY\$/;
     this._re.allKeywords  = /\bRND\b(?!\()|\bMOD\b|\bOR\b|\bAND\b|\bNOT\b|<>|(?<![=<>])=(?!=)|\^/g;
@@ -1105,8 +1105,9 @@ async executeNextLine() {
                 if (newIndex !== -1) {
                     this.currentLineIndex = newIndex;
                 } else {
-                    this.debugPrint(`Warning: Line number ${result} not found`);
-                    this.currentLineIndex++;
+                    this._errorUl(result);
+                    this.programRunning = false;
+                    return;
                 }
             } else if (this.waitingForInput) {
                 this._flushGraphics();
@@ -1891,20 +1892,28 @@ _evalNested(expr) {
     this._re.allKeywords.lastIndex = 0;
     if (expr !== prevExpr) quoteMap = this._buildQuoteMap(expr);
 
-    // Stage 4: Built-in function dispatch
+    // Stage 4: Built-in function dispatch (paren-counting for arbitrary nesting depth)
     while (true) {
         const funcMatch = this._re.funcMatch.exec(expr);
         if (!funcMatch) break;
         if (isInQuotes(funcMatch.index)) break;
 
         const funcName  = funcMatch[1];
-        const innerExpr = funcMatch[2];
+        // Find matching close paren via counting (handles any nesting depth)
+        const argStart = funcMatch.index + funcMatch[0].length;
+        let depth = 1, argEnd = argStart;
+        for (let ci = argStart; ci < expr.length; ci++) {
+            if (expr[ci] === '(') depth++;
+            else if (expr[ci] === ')') { depth--; if (depth === 0) { argEnd = ci; break; } }
+        }
+        if (depth !== 0) break;
+        const innerExpr = expr.substring(argStart, argEnd);
         const innerValue = this._evalNested(innerExpr);
 
         const handler = this._builtinFunctions[funcName];
         if (handler) {
             const result = handler(innerValue, innerExpr);
-            expr = expr.substring(0, funcMatch.index) + String(result) + expr.substring(funcMatch.index + funcMatch[0].length);
+            expr = expr.substring(0, funcMatch.index) + String(result) + expr.substring(argEnd + 1);
             quoteMap = this._buildQuoteMap(expr);
         } else {
             this.debugPrint(`Unknown function: ${funcName}`, 'error');
