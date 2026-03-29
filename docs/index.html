@@ -63,6 +63,9 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 <h1>JMR's TRS-80 Simulator</h1>
 <div id="screenFrame">
 <canvas id="screen" width="768" height="288" tabindex="0"></canvas>
+<!-- Hidden input to trigger virtual keyboard on mobile/tablet -->
+<input id="mobileKeyInput" type="text" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false"
+  style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;">
 </div>
 <textarea id="inputArea" spellcheck="false" placeholder="Enter BASIC program here..."></textarea>
 <div id="buttonBar">
@@ -229,7 +232,29 @@ constructor() {
 
     // Keyboard handling on canvas
     this.canvas.addEventListener('keydown', (e) => this._handleKeyDown(e));
-    this.canvas.addEventListener('click', () => this.canvas.focus());
+
+    // Mobile/tablet virtual keyboard support
+    this._mobileInput = document.getElementById('mobileKeyInput');
+    this._isMobile = /iPad|iPhone|iPod|Android/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1);
+    this._mobileInput.addEventListener('input', (e) => {
+        const val = this._mobileInput.value;
+        if (val.length > 0) {
+            // Process each new character as a keydown
+            for (const ch of val) {
+                this._handleKeyDown({ key: ch, preventDefault: () => {} });
+            }
+            this._mobileInput.value = '';
+        }
+    });
+    this._mobileInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' || e.key === 'Backspace' || e.key === 'Escape') {
+            this._handleKeyDown(e);
+        }
+    });
+
+    // Focus handler: on mobile, focus the hidden input to raise keyboard
+    this.canvas.addEventListener('click', () => this._focusForInput());
+    this.canvas.addEventListener('touchend', (e) => { e.preventDefault(); this._focusForInput(); });
 
     // Auto-capitalize input area
     this.inputArea.addEventListener('input', () => {
@@ -324,7 +349,7 @@ _showHelp() {
 }
 _hideHelp() {
     document.getElementById('helpOverlay').classList.remove('show');
-    this.screen.focus();
+    this._focusForInput();
 }
 
 get _helpTexts() { return [
@@ -362,7 +387,8 @@ LOADING TAPE DATA (for adventure games, etc.)
 KEYBOARD
   ESC or Ctrl+C .. BREAK (stop program)
   Enter .......... Submit input / execute command
-  Click screen ... Refocus for keyboard input`,
+  Click/tap screen . Refocus for keyboard input
+  (On iPad/mobile: tap screen to open keyboard)`,
 
 // Tab 1: Commands
 `COMMANDS & SYNTAX
@@ -653,6 +679,14 @@ updateCursorDisplay() {
 // ------------------------------------------------------------------
 //  Keyboard Input — mirrors on_key_press routing
 // ------------------------------------------------------------------
+_focusForInput() {
+    if (this._isMobile) {
+        this._mobileInput.focus();
+    } else {
+        this.canvas.focus();
+    }
+}
+
 _handleKeyDown(event) {
     // BREAK: Esc or Ctrl+C
     if (this.programRunning && (event.key === 'Escape' || (event.ctrlKey && event.key === 'c'))) {
@@ -802,7 +836,7 @@ _parseNumeric(s) {
 enableImmediateMode() {
     if (!this.programRunning && !this.waitingForInput) {
         this.immediateMode = true;
-        this.canvas.focus();
+        this._focusForInput();
         this._ensureImmediatePrompt(true);
     }
 }
@@ -1024,7 +1058,7 @@ runProgram() {
     this.programPaused  = false;
     this._setStopBtn(true);
     this.debugPrint('Starting program execution');
-    this.canvas.focus();
+    this._focusForInput();
     if (!this.stepping) this.executeNextLine();
 }
 
@@ -1037,7 +1071,7 @@ async executeNextLine() {
             this._flushGraphics();
             this.debugPrint('Program execution completed');
             if (!this.immediateMode) this.enableImmediateMode();
-            this.canvas.focus();
+            this._focusForInput();
             return;
         }
 
@@ -1404,7 +1438,7 @@ _cmdInput(command) {
     this.inputVariable = varName;
     this.inputStartRow = this.cursorRow;
     this.inputStartCol = this.cursorCol;
-    this.canvas.focus();
+    this._focusForInput();
 }
 
 // ------------------------------------------------------------------
@@ -1661,7 +1695,7 @@ _handleTapeFileLoad(event) {
             setTimeout(() => this.executeNextLine(), 50);
         }
         // Re-focus the canvas so keyboard input works immediately
-        setTimeout(() => this.screen.focus(), 100);
+        setTimeout(() => this._focusForInput(), 100);
     };
     reader.readAsText(file);
     event.target.value = '';
@@ -1760,7 +1794,7 @@ async _loadFromGitHub(selectEl, type) {
                 setTimeout(() => this.executeNextLine(), 50);
             }
         }
-        setTimeout(() => this.screen.focus(), 100);
+        setTimeout(() => this._focusForInput(), 100);
     } catch (err) {
         this.printToScreen(`?LOAD ERROR: ${err.message}`);
     }
@@ -2280,7 +2314,7 @@ _handleFileLoad(event) {
             this.enableImmediateMode();
         }
         // Re-focus the canvas so keyboard input works immediately
-        setTimeout(() => this.screen.focus(), 100);
+        setTimeout(() => this._focusForInput(), 100);
     };
     reader.readAsText(file);
     event.target.value = '';
@@ -2365,7 +2399,7 @@ breakProgram() {
         this.waitingForInput = false;
         this._setStopBtn(false);
         this.enableImmediateMode();
-        this.canvas.focus();
+        this._focusForInput();
     }
 }
 
