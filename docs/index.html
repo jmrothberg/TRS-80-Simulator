@@ -1915,8 +1915,14 @@ _evalNested(expr) {
                     expr = expr.substring(0, m.index) + String(replacement) + expr.substring(endIndex + 1);
                     searchStart = m.index + String(replacement).length;
                 } else {
+                    // Capture full variable state for debugging
+                    const vars = {};
+                    for (const k of ['X','Y','R','C','I','DX','DY']) {
+                        if (this.scalarVariables.hasOwnProperty(k)) vars[k] = this.scalarVariables[k];
+                    }
+                    console.error(`BS ERROR: ${arrayName}[${index}], array length=${this.arrayVariables[arrayName].length}, vars=`, vars, `expr="${expr}"`);
                     this._errorBs(arrayName, index);
-                    break;
+                    throw new Error(`Array index out of bounds: ${arrayName}[${index}]`);
                 }
             }
         }
@@ -1962,7 +1968,10 @@ _evalNested(expr) {
                             const safe = String(value).replace(/'/g, "\\'");
                             newParts.push(`'${safe}'`);
                         } else {
-                            newParts.push(String(value));
+                            // Wrap negative numbers in parens to prevent --x issues
+                            // e.g. -DY when DY=-1 would become --1 without parens
+                            const sv = String(value);
+                            newParts.push(sv[0] === '-' ? `(${sv})` : sv);
                         }
                     } else {
                         newParts.push(parts[pi].substring(lastEnd, e));
@@ -2355,7 +2364,17 @@ _getCurrentLineNumber() {
 _errorSn(detail = '') { const ln = this._getCurrentLineNumber(); const msg = `?SN ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(detail ? `${msg} - ${detail}` : msg, 'error'); }
 _errorFc(detail = '') { const ln = this._getCurrentLineNumber(); const msg = `?FC ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(detail ? `${msg} - ${detail}` : msg, 'error'); }
 _errorUl(lineNum)     { const ln = this._getCurrentLineNumber(); const msg = `?UL ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(`${msg} - Line ${lineNum} not found`, 'error'); }
-_errorBs(arr, idx)    { const ln = this._getCurrentLineNumber(); const msg = `?BS ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(`${msg} - Index ${idx} out of bounds for ${arr}`, 'error'); }
+_errorBs(arr, idx) {
+    const ln = this._getCurrentLineNumber();
+    const msg = `?BS ERROR IN ${ln}`;
+    const arrLen = this.arrayVariables[arr] ? this.arrayVariables[arr].length : '?';
+    this.printToScreen(msg);
+    this.debugPrint(`${msg} - ${arr}(${idx}) out of bounds (array size ${arrLen})`, 'error');
+    // Show relevant variable values for debugging
+    const dbgVars = ['X','Y','R','C','I','DX','DY'].filter(v => this.scalarVariables.hasOwnProperty(v)).map(v => `${v}=${this.scalarVariables[v]}`).join(', ');
+    if (dbgVars) this.debugPrint(`Variables: ${dbgVars}`, 'error');
+    this.programRunning = false;
+}
 _errorOd()            { const ln = this._getCurrentLineNumber(); const msg = `?OD ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(msg, 'error'); }
 _errorNf(v)           { const ln = this._getCurrentLineNumber(); const msg = `?NF ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(v ? `${msg} - Variable ${v}` : msg, 'error'); }
 _errorRg()            { const ln = this._getCurrentLineNumber(); const msg = `?RG ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(msg, 'error'); }
