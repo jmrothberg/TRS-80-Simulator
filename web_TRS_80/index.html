@@ -35,6 +35,9 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 #debugBar button { background: #383838; color: #bbb; border: 1px solid #555; padding: 2px 8px; font-size: 11px; cursor: pointer; border-radius: 2px; }
 #fileInput { display: none; }
 #tapeInput { display: none; }
+/* GitHub file dropdowns */
+#buttonBar select { background: #444; color: #ddd; border: 1px solid #666; padding: 4px 6px; font-size: 12px; cursor: pointer; border-radius: 3px; max-width: 160px; }
+#buttonBar select:hover { background: #555; }
 /* Help overlay */
 #helpOverlay {
     display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
@@ -71,7 +74,9 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 <button id="btnNew">NEW</button>
 <button id="btnSave">SAVE</button>
 <button id="btnLoad">LOAD</button>
+<select id="selExamples"><option value="">-- Examples --</option></select>
 <button id="btnTape">Load Tape</button>
+<select id="selTape"><option value="">-- Tape Files --</option></select>
 <button id="btnCopy">Copy</button>
 <button id="btnDebug">Debug: ON</button>
 <button id="btnHelp">Help</button>
@@ -301,6 +306,13 @@ _wireButtons() {
 
     document.getElementById('fileInput').addEventListener('change', (e) => this._handleFileLoad(e));
     document.getElementById('tapeInput').addEventListener('change', (e) => this._handleTapeFileLoad(e));
+
+    // GitHub-hosted example programs and tape files
+    const selExamples = document.getElementById('selExamples');
+    const selTape     = document.getElementById('selTape');
+    selExamples.onchange = () => this._loadFromGitHub(selExamples, 'bas');
+    selTape.onchange     = () => this._loadFromGitHub(selTape, 'dat');
+    this._populateGitHubDropdowns();
 }
 
 // ------------------------------------------------------------------
@@ -1653,6 +1665,106 @@ _handleTapeFileLoad(event) {
     };
     reader.readAsText(file);
     event.target.value = '';
+}
+
+// ------------------------------------------------------------------
+//  GitHub-hosted file loading (Examples & Tape files)
+// ------------------------------------------------------------------
+_populateGitHubDropdowns() {
+    const baseUrl = 'https://jmrothberg.github.io/TRS-80-Simulator/';
+    const selExamples = document.getElementById('selExamples');
+    const selTape     = document.getElementById('selTape');
+
+    const basFiles = [
+        'Basic_Code_Examples/Hello_world.bas',
+        'Basic_Code_Examples/Example.bas',
+        'Basic_Code_Examples/Test.bas',
+        'Basic_Code_Examples/String_test.bas',
+        'Basic_Code_Examples/Line_by_line_test.bas',
+        'Basic_Code_Examples/complex_test_suite.bas',
+        'Basic_Code_Examples/screentest.bas',
+        'Basic_Code_Examples/inkey.bas',
+        'Basic_Code_Examples/Hi_Low.bas',
+        'Basic_Code_Examples/Falling_star.bas',
+        'Basic_Code_Examples/hangman.bas',
+        'Basic_Code_Examples/snake_simple.bas',
+        'Basic_Code_Examples/Snake.bas',
+        'Basic_Code_Examples/asteroid.bas',
+        'Basic_Code_Examples/breakout_II.bas',
+        'Basic_Code_Examples/Invaders_IV.bas',
+        'Basic_Code_Examples/Invaders_V.bas',
+        'Basic_Code_Examples/Invaders_VI.bas',
+        'Basic_Code_Examples/Invaders_full.bas',
+        'Scott_Adams_Basic_version/SCOTTADV.BAS',
+    ];
+    for (const path of basFiles) {
+        const opt = document.createElement('option');
+        opt.value = baseUrl + path;
+        opt.textContent = path.split('/').pop();
+        selExamples.appendChild(opt);
+    }
+
+    const datFiles = [
+        'Scott_Adams_Basic_version/Game_Data/adv01.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv02.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv03.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv04.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv05.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv06.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv07.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv08.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv09.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv10.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv11.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv12.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv13.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv14a.dat',
+        'Scott_Adams_Basic_version/Game_Data/adv14b.dat',
+        'Scott_Adams_Basic_version/Game_Data/quest1.dat',
+        'Scott_Adams_Basic_version/Game_Data/quest2.dat',
+        'Scott_Adams_Basic_version/Game_Data/sampler1.dat',
+    ];
+    for (const path of datFiles) {
+        const opt = document.createElement('option');
+        opt.value = baseUrl + path;
+        opt.textContent = path.split('/').pop();
+        selTape.appendChild(opt);
+    }
+}
+
+async _loadFromGitHub(selectEl, type) {
+    const url = selectEl.value;
+    if (!url) return;
+    const filename = url.split('/').pop();
+    try {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const content = await response.text();
+
+        if (type === 'bas') {
+            const lines = this._sortProgramLines(content.trim().split('\n'));
+            this.inputArea.value = lines.join('\n');
+            this.storedProgram = lines;
+            this.printToScreen(`LOADED: ${filename}`);
+            this.enableImmediateMode();
+        } else {
+            const lines = content.split('\n').map(l => l.trim()).filter(l => l !== '');
+            this.tapeData    = lines;
+            this.tapePointer = 0;
+            this.printToScreen(`TAPE LOADED: ${filename} (${lines.length} records)`);
+            this.debugPrint(`Tape loaded from GitHub: ${filename}, ${lines.length} records`);
+            if (this.waitingForTape) {
+                this.waitingForTape = false;
+                this.programPaused  = false;
+                this._setTapeButtonWaiting(false);
+                setTimeout(() => this.executeNextLine(), 50);
+            }
+        }
+        setTimeout(() => this.screen.focus(), 100);
+    } catch (err) {
+        this.printToScreen(`?LOAD ERROR: ${err.message}`);
+    }
+    selectEl.selectedIndex = 0;
 }
 
 // ------------------------------------------------------------------
