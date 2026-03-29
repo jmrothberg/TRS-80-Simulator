@@ -1968,7 +1968,10 @@ _evalNested(expr) {
                             const safe = String(value).replace(/'/g, "\\'");
                             newParts.push(`'${safe}'`);
                         } else {
-                            newParts.push(String(value));
+                            // Wrap negative numbers in parens to prevent --x issues
+                            // e.g. -DY when DY=-1 would become --1 without parens
+                            const sv = String(value);
+                            newParts.push(sv[0] === '-' ? `(${sv})` : sv);
                         }
                     } else {
                         newParts.push(parts[pi].substring(lastEnd, e));
