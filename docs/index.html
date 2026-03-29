@@ -2082,12 +2082,13 @@ _wrapTrs80Logic(expr) {
 }
 
 _findCompOp(expr, opStr) {
-    let inQuote = false;
+    let inDouble = false, inSingle = false;
     const opLen = opStr.length;
     let i = 0;
     while (i <= expr.length - opLen) {
-        if (expr[i] === '"') { inQuote = !inQuote; i++; continue; }
-        if (!inQuote && expr.substring(i, i + opLen) === opStr) {
+        if (expr[i] === '"' && !inSingle) { inDouble = !inDouble; i++; continue; }
+        if (expr[i] === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
+        if (!inDouble && !inSingle && expr.substring(i, i + opLen) === opStr) {
             if (opStr === '>' && i + 1 < expr.length && expr[i + 1] === '=') { i += 2; continue; }
             if (opStr === '<' && i + 1 < expr.length && expr[i + 1] === '=') { i += 2; continue; }
             return i;
