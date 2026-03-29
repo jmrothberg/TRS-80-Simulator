@@ -1487,7 +1487,9 @@ _cmdNext(command) {
         varName = keys[keys.length - 1];
     }
     const loop = this.forLoops[varName];
-    loop.current += loop.step;
+    // Read from scalar variable so manual changes (e.g., AI=NA to break loop)
+    // are respected — real TRS-80 BASIC reads the variable, not an internal copy
+    loop.current = (this.scalarVariables[varName] ?? loop.current) + loop.step;
     this.scalarVariables[varName] = loop.current;
     if ((loop.step > 0 && loop.current <= loop.end) || (loop.step < 0 && loop.current >= loop.end)) {
         return loop.nextLineNumber;

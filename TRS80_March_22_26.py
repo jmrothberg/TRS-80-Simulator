@@ -2558,7 +2558,9 @@ class TRS80Simulator:
                 # Use innermost loop (avoid building a full list)
                 var = next(reversed(self.for_loops))
             loop = self.for_loops[var]
-            loop['current'] += loop['step']
+            # Read from scalar variable so manual changes (e.g., AI=NA to break)
+            # are respected — real TRS-80 BASIC reads the variable, not an internal copy
+            loop['current'] = self.scalar_variables.get(var, loop['current']) + loop['step']
             self.scalar_variables[var] = loop['current']
             if (loop['step'] > 0 and loop['current'] <= loop['end']) or (loop['step'] < 0 and loop['current'] >= loop['end']):
                 if self.debug_mode:
