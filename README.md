@@ -2,262 +2,108 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Live Demo](https://img.shields.io/badge/demo-GitHub_Pages-brightgreen)](https://jmrothberg.github.io/TRS-80-Simulator/)
 
-A desktop simulator for the TRS-80 Model I Level II BASIC, written in Python with a Tkinter GUI.  It runs vintage-style BASIC programs on a green-on-black 64x16 text / 128x48 graphics display and includes a built-in debugger and an optional LLM companion for code help.
+Two faithful TRS-80 Model I Level II BASIC emulators — a **Python desktop app** (Tkinter) and a **browser-based JavaScript version** — that run vintage BASIC programs on a green-on-black 64x16 text / 128x48 graphics display. Both support tape I/O (`INPUT#-1` / `PRINT#-1`) for loading data files, and both include a built-in debugger.
 
-The same BASIC interpreter is also available as a **browser-based emulator** in the `web_TRS_80/` folder (single `index.html`).
+The flagship demo is **SCOTTADV.BAS**, a ~580-line BASIC program that plays all 18 classic Scott Adams text adventure games from their original ScottFree `.dat` files.
 
 ![Screen layout](https://img.shields.io/badge/display-64x16_text_%7C_128x48_graphics-green)
 
-## Quick Start (desktop — Python)
+---
 
-```bash
-pip install -r requirements.txt
-python TRS80_March_22_26.py
-```
+## Two Versions of the Simulator
 
-Type BASIC lines directly on the green screen (immediate mode) or paste a program into the input area and press **RUN**.
+| Version | Location | How to run |
+|---------|----------|------------|
+| **Python (desktop)** | `TRS80_March_28_26.py` | `pip install -r requirements.txt && python TRS80_March_28_26.py` |
+| **JavaScript (browser)** | `web_TRS_80/index.html` | Open in any browser — no server needed |
+| **Live online demo** | `docs/index.html` | **[jmrothberg.github.io/TRS-80-Simulator](https://jmrothberg.github.io/TRS-80-Simulator/)** |
 
-## Web emulator (browser)
+Both versions run the same BASIC programs identically. The `docs/` folder is a copy of `web_TRS_80/index.html` that GitHub Pages serves — you can't serve `web_TRS_80/` directly from Pages, so the copy is necessary.
 
-| Where | How |
-|-------|-----|
-| **Local** | Open `web_TRS_80/index.html` in a web browser (no server required). |
-| **GitHub Pages** | **[https://jmrothberg.github.io/TRS-80-Simulator/](https://jmrothberg.github.io/TRS-80-Simulator/)** — static site from the `docs/` folder (same app as `web_TRS_80/index.html`). |
+> **Keep in sync:** After changing `web_TRS_80/index.html`, run `cp web_TRS_80/index.html docs/index.html` before committing so the live demo stays current.
 
-The web version has the same BASIC interpreter as the Python version, plus a **Help** button with tabbed reference covering commands, functions, graphics, and a step-by-step guide for playing Scott Adams adventures. Use **Load Tape** to pre-load `.dat` game files before running adventure programs.
-
-**Publishing:** In the repository **Settings → Pages**, set **Source** to **Deploy from a branch**, branch **main**, folder **`/docs`**. The first deploy may take a minute after you push.
-
-When you change the web emulator, keep **`docs/index.html`** in sync with **`web_TRS_80/index.html`** (for example: `cp web_TRS_80/index.html docs/index.html` before committing).
+Type BASIC lines directly on the green screen (immediate mode) or paste a program into the input area and press **RUN**. The web version also has a **Help** button with tabbed reference covering commands, functions, graphics, and adventure game instructions.
 
 ---
 
-## Project Files
+## Tape I/O — Loading Data Files
 
-| File | Purpose |
-|------|---------|
-| `TRS80_March_22_26.py` | Main simulator — interpreter, UI, screen, debugger (~3,900 lines, single class) |
-| `web_TRS_80/` | **Web port** — TRS-80 BASIC in the browser (`index.html` + plan notes) |
-| `docs/` | Copy of `web_TRS_80/index.html` for **GitHub Pages** (`/` on the Pages site) |
-| `TRS80LLMSupport.py` | Optional AI companion window (Claude API, Ollama, HuggingFace) |
-| `Basic_Code_Examples/` | Sample `.bas` programs: games, tests, demos, adventure interpreter |
-| `Game_Data/` | ScottFree `.dat` files for Scott Adams text adventures |
-| `Hailo_for_Pi/` | Hailo-10H AI accelerator support for Raspberry Pi |
-| `TRS80_BASIC_REFERENCE.md` | Language reference for the supported BASIC dialect |
-| `requirements.txt` | Python dependencies |
+Both simulators support TRS-80 tape I/O for reading and writing sequential data. This is how programs like SCOTTADV.BAS load game data from `.dat` files.
+
+### BASIC tape commands
+
+```basic
+INPUT#-1, V$          ' Read next line from tape into string variable V$
+INPUT#-1, X           ' Read next line from tape into numeric variable X
+PRINT#-1, expression  ' Write a value to tape output
+```
+
+### How to load a tape file
+
+**Web version:**
+1. Click the **Load Tape** button and select your `.dat` file
+2. The screen shows `TAPE LOADED: filename (N records)`
+3. Now run your BASIC program — `INPUT#-1` reads from the loaded data immediately
+
+If you run a program that calls `INPUT#-1` before loading a tape, the simulator pauses with `INSERT TAPE` and the Load Tape button pulses amber. Click it to select a file, and the program resumes automatically.
+
+**Python version:**
+1. When a running program hits `INPUT#-1` with no tape loaded, a file dialog opens
+2. Select your `.dat` file
+3. The program continues reading from it
+
+### Example: Reading a data file in BASIC
+
+```basic
+10 REM *** READ DATA FROM TAPE ***
+20 INPUT#-1, N$
+30 PRINT "FIRST LINE: "; N$
+40 INPUT#-1, X
+50 PRINT "SECOND LINE (NUMERIC): "; X
+60 END
+```
+
+Load a tape file before (or when prompted), and the program reads each line sequentially. Each `INPUT#-1` call reads the next line from the file.
 
 ---
 
-## How the Interpreter Works
+## SCOTTADV.BAS — Scott Adams Adventure Interpreter
 
-The interpreter turns BASIC source text into execution through a five-stage pipeline that runs cooperatively inside the Tkinter main loop.
-
-### Stage 1 — Editing & Storage
-
-The user types BASIC lines into either:
-- The **green screen** (immediate mode, `>` prompt) — numbered lines are stored; bare commands execute immediately.
-- The **input area** (ScrolledText widget below the screen) — edited as plain text, synced to `stored_program` on every keystroke.
-
-Lines are always kept sorted by line number.
-
-### Stage 2 — Preprocessing (`preprocess_program`)
-
-Before RUN, multi-statement lines are split on colons:
-
-```
-10 A=1: B=2: PRINT A+B
-```
-becomes three internal entries:
-```
-10   A=1
-10.1 B=2
-10.2 PRINT A+B
-```
-
-Colons inside quoted strings and after `THEN`/`ELSE` are preserved (the IF/THEN clause stays as one unit).  All `DATA` statements are pre-scanned into `data_values[]` so `READ` can access them in program order regardless of execution flow.
-
-### Stage 3 — Execution Loop (`execute_next_line`)
-
-`run_program` builds three parallel arrays from the sorted, preprocessed lines:
-
-| Array | Contents |
-|-------|----------|
-| `_line_numbers[i]` | BASIC line number (float — supports `10.1`) |
-| `_line_commands[i]` | Command text after the line number |
-| `_line_cmd_words[i]` | First keyword, pre-extracted for fast dispatch |
-
-`execute_next_line` is a tight `while` loop that walks `current_line_index` forward, calling `execute_command()` for each line.  The return value controls flow:
-
-| Return | Meaning |
-|--------|---------|
-| `None` | Advance to the next line |
-| `int`/`float` | Branch to that line number (GOTO, GOSUB, FOR/NEXT loop-back) |
-| *sets `waiting_for_input`* | Pause — return to Tkinter event loop; `handle_input_return` resumes via `after()` |
-
-**GUI responsiveness:**  The loop yields to Tkinter periodically — `update_idletasks()` every iteration when `INKEY$` is used (games need responsive key polling), otherwise every 10th iteration.  A full `update()` happens every 25th iteration to flush graphics.
-
-### Stage 4 — Command Dispatch (`execute_command`)
-
-The pre-extracted keyword is looked up in `_command_handlers`, a dict mapping strings to `_cmd_*` methods:
-
-```python
-_command_handlers = {
-    'PRINT': _cmd_print,
-    'LET':   _cmd_let,
-    'FOR':   _cmd_for,
-    'NEXT':  _cmd_next,
-    'GOTO':  _cmd_goto,
-    'GOSUB': _cmd_gosub,
-    'IF':    _cmd_if,
-    ...
-}
-```
-
-If the keyword isn't found but the line contains `=`, it's treated as an implicit `LET` (`A=5` becomes `LET A=5`).
-
-### Stage 5 — Expression Evaluation (`evaluate_expression` / `_eval_nested`)
-
-This is the heart of the interpreter.  Expressions like `A*2+RND(5)` go through eight stages:
-
-```
-  BASIC expression string
-       │
-  ┌────▼─────────────────────────────────────────────┐
-  │ 1. Fast paths: pure integer, negative int, or    │
-  │    simple variable lookup → return immediately    │
-  └────┬─────────────────────────────────────────────┘
-       │ (not a fast path)
-  ┌────▼─────────────────────────────────────────────┐
-  │ 2. Build quote-map (bytearray, 0/1 per char)    │
-  │    to protect string literals from replacement    │
-  └────┬─────────────────────────────────────────────┘
-       │
-  ┌────▼─────────────────────────────────────────────┐
-  │ 3. INKEY$ replacement (at most once)             │
-  └────┬─────────────────────────────────────────────┘
-       │
-  ┌────▼─────────────────────────────────────────────┐
-  │ 4. Single-pass keyword translation               │
-  │    (one combined regex: AND→and, OR→or, MOD→%,   │
-  │     ^→**, =→==, <>→!=, bare RND→random float)    │
-  └────┬─────────────────────────────────────────────┘
-       │
-  ┌────▼─────────────────────────────────────────────┐
-  │ 5. Built-in function dispatch (INT, RND, LEFT$,  │
-  │    MID$, etc.) via _builtin_functions table       │
-  │    — inner expression evaluated recursively       │
-  └────┬─────────────────────────────────────────────┘
-       │
-  ┌────▼─────────────────────────────────────────────┐
-  │ 6. Array reference substitution                  │
-  │    A(I) → looked up in array_variables            │
-  └────┬─────────────────────────────────────────────┘
-       │
-  ┌────▼─────────────────────────────────────────────┐
-  │ 7. Scalar variable substitution                  │
-  │    (longest-first to prevent "A" clobbering "AB") │
-  └────┬─────────────────────────────────────────────┘
-       │
-  ┌────▼─────────────────────────────────────────────┐
-  │ 8. Comparison wrapping for TRS-80 semantics      │
-  │    A > B → _gt(A,B) returning -1 (true) or 0     │
-  └────┬─────────────────────────────────────────────┘
-       │
-  ┌────▼─────────────────────────────────────────────┐
-  │ 9. Python eval() in restricted namespace         │
-  │    (__builtins__=None, only math + comparisons)   │
-  └────┴─────────────────────────────────────────────┘
-```
-
----
-
-## Screen Model
-
-| Layer | Resolution | Storage | Canvas tags |
-|-------|-----------|---------|-------------|
-| Text | 64 cols x 16 rows | `screen_content[][]` | `c{row}_{col}` |
-| Graphics | 128 x 48 pixels | `pixel_matrix[][]` | `p{x}_{y}` |
-
-Each text cell covers a 2x3 block of graphics pixels.  Canvas items use tags so `find_withtag`/`itemconfigure` can update in place instead of delete+create.
-
-Graphics `SET`/`RESET` calls are batched in `_pending_graphics` and flushed every 20 operations or at GUI-update boundaries.  `_active_pixels` (a set) tracks which pixels are lit for efficient scroll and redraw.
-
----
-
-## Key Data Structures
-
-```
-scalar_variables    dict  {name: value}         {"A": 5, "N$": "HI"}
-array_variables     dict  {name: list}          {"A": [0,0,0,...]}
-for_loops           dict  {var: loop_info}      loop_info has start/end/step/current/next_line_number
-gosub_stack         list  [return_line_index]    indices into _line_numbers
-_line_numbers       list  [float]                parallel array: BASIC line numbers
-_line_commands      list  [str]                  parallel array: command text
-_line_cmd_words     list  [str]                  parallel array: first keyword
-_command_handlers   dict  {keyword: method}      command dispatch table
-_builtin_functions  dict  {name: callable}       function dispatch table
-_regex_cache        dict  {name: compiled_re}    all pre-compiled regex patterns
-_eval_namespace     dict                          restricted namespace for eval()
-```
-
----
-
-## Performance Architecture
-
-The hot path is: `execute_next_line` → `execute_command` → `evaluate_expression` → `_eval_nested`.  Key optimizations:
-
-- **Cached derived values:** `_screen_font`, `_char_w`, `_char_h` avoid recomputing font tuples and pixel math on every draw call.
-- **Single-pass keyword replacement:** One combined regex replaces all BASIC→Python operator translations in a single `re.sub` pass instead of eight separate passes.
-- **Quote-map as bytearray:** Faster allocation and truthiness checks than `list[bool]`.
-- **Pre-parsed command words:** The first keyword of each line is extracted once at RUN time and passed to `execute_command`, avoiding repeated string splitting.
-- **Guarded debug prints:** f-string formatting for debug messages is skipped entirely when debug mode is off.
-- **Canvas itemconfigure:** Text characters use `find_withtag` + `itemconfigure` to update existing items instead of deleting and recreating.
-- **Batched graphics:** `SET`/`RESET` queue operations and flush in batches of 20.
-- **O(active) scroll:** `_scroll_screen_up` shifts the active-pixel set with a comprehension instead of scanning all 6,144 positions.
-
----
-
-## BASIC Dialect Notes
-
-The simulator targets TRS-80 Model I Level II BASIC:
-
-- Every program line needs a line number.  Keywords must be uppercase.
-- `PRINT@` uses 1-based screen positions (1-1024).
-- `RND(n)` returns an integer from 1 to n.  `RND(0)` returns a float 0-1.
-- Comparisons return `-1` (true) or `0` (false).
-- `AND`, `OR`, `NOT` work as logical operators on -1/0 values.
-- `STR$(n)` includes a leading space for the sign placeholder.
-- `PEEK(14400)` polls the keyboard buffer (primary method for game input).
-- Multiple statements per line: `10 A=1: B=2: PRINT A+B`
-- `IF ... THEN ... ELSE ...` — colons after THEN/ELSE stay in the IF clause.
-
-See `TRS80_BASIC_REFERENCE.md` for the full language reference.
-
----
-
-## Debugging Tools
-
-- **Debug window** — Toggle with the Debug button.  Shows a timestamped execution trace (line number, step count, variable assignments, errors) with search and copy.
-- **Variables window** — Live view of scalars, arrays, FOR loops, and GOSUB stack.
-- **Step mode** — Single-step through execution with the STEP button.
-- **LLM companion** — Send debug output or program state to an AI assistant (Claude, Ollama, or local HuggingFace models).
-
----
-
-## Scott Adams Text Adventures
-
-The simulator includes **SCOTTADV.BAS**, a TRS-80 BASIC interpreter that plays all 14 classic Scott Adams adventure games from their original ScottFree `.dat` data files.
+The crown jewel of this project: a complete Scott Adams adventure engine written in TRS-80 BASIC (~580 lines). It reads the standard ScottFree `.dat` format via tape I/O and plays all 18 classic text adventures.
 
 ### How to play
 
-1. Load `Basic_Code_Examples/SCOTTADV.BAS` (LOAD button in web, or `LOAD` command in Python)
-2. Load the game data using **Load Tape** — select a `.dat` file from `Game_Data/`
-3. Type `RUN` and press Enter when prompted — the adventure begins!
+**Web version** ([try it live](https://jmrothberg.github.io/TRS-80-Simulator/)):
+1. Click **LOAD** → select `Scott_Adams_Basic_version/SCOTTADV.BAS`
+2. Click **Load Tape** → select a `.dat` file from `Scott_Adams_Basic_version/Game_Data/`
+3. Click **RUN** → press Enter when prompted → the adventure loads!
 
-Type two-word commands (`GO NORTH`, `GET AXE`, `OPEN DOOR`) or shortcuts (`N`, `S`, `E`, `W`, `U`, `D`, `I` for inventory, `L` for look).
+**Python version:**
+1. Launch `python TRS80_March_28_26.py`
+2. Type `LOAD` on the green screen → select `SCOTTADV.BAS`
+3. Type `RUN` → press Enter → select the `.dat` file when the dialog appears
 
-### Available games
+### Playing the game
+
+Type two-word commands at the `WHAT SHALL I DO?` prompt:
+
+```
+GO NORTH        — move north
+GET AXE         — pick up an item
+DROP LAMP       — drop an item
+OPEN DOOR       — interact with objects
+SAY BUNYUN      — speak a magic word
+```
+
+**Shortcuts:** `N` `S` `E` `W` `U` `D` (movement), `I` (inventory), `L` (look), `SCORE`, `HELP`, `QUIT`
+
+Collect treasures (items with `*` in their name) and bring them to the treasure room to score points.
+
+### Available game data files
+
+All 18 ScottFree `.dat` files are in `Scott_Adams_Basic_version/Game_Data/`:
 
 | File | Game |
 |------|------|
@@ -274,9 +120,31 @@ Type two-word commands (`GO NORTH`, `GET AXE`, `OPEN DOOR`) or shortcuts (`N`, `
 | `adv11.dat` | Savage Island Part 2 |
 | `adv12.dat` | Golden Voyage |
 | `adv13.dat` | Sorcerer of Claymorgue Castle |
-| `adv14a.dat` | Return to Pirate's Isle |
+| `adv14a.dat` | Return to Pirate's Isle (Part 1) |
+| `adv14b.dat` | Return to Pirate's Isle (Part 2) |
+| `quest1.dat` | QuestProbe: The Hulk |
+| `quest2.dat` | QuestProbe: Spider-Man |
+| `sampler1.dat` | Adventure Sampler |
 
-The interpreter reads the standard ScottFree ASCII `.dat` format via tape I/O (`INPUT#-1`). Additional `.dat` files can be downloaded from the [ScottFree archive](https://www.ifarchive.org/indexes/if-archive/scott-adams/).
+The interpreter reads the standard ScottFree ASCII `.dat` format. Additional `.dat` files can be downloaded from the [ScottFree archive](https://www.ifarchive.org/indexes/if-archive/scott-adams/).
+
+> **Also available:** A standalone JavaScript version of the Scott Adams engine with graphics is at **[jmrothberg.github.io/scott-adams-adventures](https://jmrothberg.github.io/scott-adams-adventures/)** ([repo](https://github.com/jmrothberg/scott-adams-adventures)). That version runs the `.dat` files directly in JavaScript without a BASIC interpreter.
+
+---
+
+## Project Files
+
+| File / Folder | Purpose |
+|---------------|---------|
+| `TRS80_March_28_26.py` | **Python simulator** — interpreter, Tkinter UI, screen, debugger (~3,900 lines) |
+| `web_TRS_80/` | **JavaScript simulator** — same BASIC interpreter in the browser (`index.html`) |
+| `docs/` | Copy of `web_TRS_80/index.html` for **[GitHub Pages](https://jmrothberg.github.io/TRS-80-Simulator/)** |
+| `Scott_Adams_Basic_version/` | **SCOTTADV.BAS** adventure interpreter + 18 `.dat` game data files |
+| `Basic_Code_Examples/` | Sample `.bas` programs: games, tests, demos |
+| `TRS80LLMSupport.py` | Optional AI companion window (Claude API, Ollama, HuggingFace) |
+| `Hailo_for_Pi/` | Hailo-10H AI accelerator support for Raspberry Pi |
+| `TRS80_BASIC_REFERENCE.md` | Language reference for the supported BASIC dialect |
+| `requirements.txt` | Python dependencies |
 
 ---
 
@@ -286,15 +154,34 @@ The `Basic_Code_Examples/` directory contains:
 
 | File | Description |
 |------|-------------|
-| `SCOTTADV.BAS` | Scott Adams adventure interpreter (reads `.dat` game files) |
 | `Invaders_V.bas` / `Invaders_VI.bas` | Space Invaders variants |
 | `asteroid.bas` | Space shooter |
 | `Snake.bas` | Snake game |
 | `breakout_II.bas` | Breakout clone |
 | `Hi_Low.bas` | Number guessing game |
+| `hangman.bas` | Hangman word game |
 | `complex_test_suite.bas` | Comprehensive BASIC feature tests |
 
-Run with: type `LOAD` on the green screen, select a `.bas` file, then type `RUN`.
+Run with: click **LOAD** (or type `LOAD` on the green screen), select a `.bas` file, then click **RUN**.
+
+---
+
+## BASIC Dialect Notes
+
+The simulator targets TRS-80 Model I Level II BASIC:
+
+- Every program line needs a line number. Keywords must be uppercase.
+- `PRINT@` uses screen positions (0-1023).
+- `RND(n)` returns an integer from 1 to n. `RND(0)` returns a float 0-1.
+- Comparisons return `-1` (true) or `0` (false).
+- `AND`, `OR`, `NOT` work as logical operators on -1/0 values.
+- `STR$(n)` includes a leading space for the sign placeholder.
+- `PEEK(14400)` polls the keyboard buffer (primary method for game input).
+- Multiple statements per line: `10 A=1: B=2: PRINT A+B`
+- `IF ... THEN ... ELSE ...` — colons after THEN/ELSE stay in the IF clause.
+- `INPUT#-1` / `PRINT#-1` for sequential tape I/O.
+
+See `TRS80_BASIC_REFERENCE.md` for the full language reference.
 
 ---
 
@@ -309,12 +196,70 @@ Run with: type `LOAD` on the green screen, select a `.bas` file, then type `RUN`
 
 ---
 
+## Debugging Tools
+
+- **Debug window** — Toggle with the Debug button. Shows a timestamped execution trace (line number, step count, variable assignments, errors).
+- **Variables window** — Live view of scalars, arrays, FOR loops, and GOSUB stack.
+- **Step mode** — Single-step through execution with the STEP button.
+- **LLM companion** — Send debug output or program state to an AI assistant (Claude, Ollama, or local HuggingFace models).
+
+---
+
+## How the Interpreter Works
+
+The interpreter turns BASIC source text into execution through a five-stage pipeline.
+
+### Stage 1 — Editing & Storage
+
+The user types BASIC lines into either:
+- The **green screen** (immediate mode, `>` prompt) — numbered lines are stored; bare commands execute immediately.
+- The **input area** (text area below the screen) — edited as plain text, synced on every keystroke.
+
+Lines are always kept sorted by line number.
+
+### Stage 2 — Preprocessing
+
+Before RUN, multi-statement lines are split on colons:
+
+```
+10 A=1: B=2: PRINT A+B
+```
+becomes three internal entries:
+```
+10   A=1
+10.1 B=2
+10.2 PRINT A+B
+```
+
+Colons inside quoted strings and after `THEN`/`ELSE` are preserved. All `DATA` statements are pre-scanned into `data_values[]` so `READ` can access them in program order.
+
+### Stage 3 — Execution Loop
+
+`run_program` builds parallel arrays of line numbers, commands, and pre-extracted keywords. `execute_next_line` walks through them, calling `execute_command()` for each line.
+
+| Return | Meaning |
+|--------|---------|
+| `None` | Advance to the next line |
+| `int`/`float` | Branch to that line number (GOTO, GOSUB, FOR/NEXT loop-back) |
+| *sets `waiting_for_input`* | Pause — return to event loop; resume on input |
+
+### Stage 4 — Command Dispatch
+
+The pre-extracted keyword is looked up in the command handler table (`PRINT`, `LET`, `FOR`, `NEXT`, `GOTO`, `GOSUB`, `IF`, etc.). If no keyword matches but the line contains `=`, it's treated as an implicit `LET`.
+
+### Stage 5 — Expression Evaluation
+
+Expressions go through: fast-path checks → quote-map building → INKEY$ replacement → keyword translation (AND/OR/MOD/^ → Python/JS operators) → function dispatch → array substitution → scalar substitution → comparison wrapping → eval.
+
+---
+
 ## Troubleshooting
 
 - **Ollama models don't appear:** Make sure Ollama is running (`ollama list`).
 - **Anthropic API not working:** Set `ANTHROPIC_API_KEY` in your shell environment.
 - **Graphics seem too small:** Use the `2X` button (not available on Raspberry Pi).
 - **Screen seems frozen:** Click the green screen or press `Ctrl+R`.
+- **Tape data not loading:** Make sure you click **Load Tape** and select the file. In the web version, you can pre-load the tape before running the program.
 
 ## Building a Standalone Executable (PyInstaller)
 
@@ -331,8 +276,8 @@ pyinstaller --onefile --console \
     --exclude-module safetensors --exclude-module accelerate \
     --exclude-module tqdm --exclude-module sympy \
     --exclude-module PIL --exclude-module cv2 \
-    --name TRS80_March_22 \
-    TRS80_March_22_26.py
+    --name TRS80 \
+    TRS80_March_28_26.py
 ```
 
 **macOS Gatekeeper fix** — required after every build:
@@ -341,18 +286,18 @@ xattr -cr dist/
 ```
 Without this, macOS will block the binary from running.
 
-**Finder double-click wrapper** — create `dist/TRS80_March_22.command`:
+**Finder double-click wrapper** — create `dist/TRS80.command`:
 ```bash
 #!/bin/bash
 cd "$(dirname "$0")"
-./TRS80_March_22
+./TRS80
 ```
-Then `chmod +x dist/TRS80_March_22.command`.  Double-click the `.command` file in Finder to launch.
+Then `chmod +x dist/TRS80.command`. Double-click the `.command` file in Finder to launch.
 
-> **Note:** The LLM companion (`TRS80LLMSupport.py`) is lazy-imported at runtime, so its heavy dependencies (torch, transformers, etc.) are excluded from the build.  The simulator itself runs without them.  If you need LLM support in the packaged build, remove the corresponding `--exclude-module` flags and expect a ~500 MB binary.
+> **Note:** The LLM companion (`TRS80LLMSupport.py`) is lazy-imported at runtime, so its heavy dependencies (torch, transformers, etc.) are excluded from the build. The simulator itself runs without them. If you need LLM support in the packaged build, remove the corresponding `--exclude-module` flags and expect a ~500 MB binary.
 
 ---
 
 ## License
 
-This project is licensed under the MIT License.  See `LICENSE`.
+This project is licensed under the MIT License. See `LICENSE`.
