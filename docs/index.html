@@ -1206,6 +1206,9 @@ executeCommand(command, cmdWord = null) {
             if (cmdWord.startsWith('PRINT')) cmdWord = 'PRINT';
         }
 
+        // Bare line number = implicit GOTO (e.g., THEN 1200)
+        if (/^\d+$/.test(command.trim())) return parseInt(command.trim());
+
         let handler = this._commandHandlers[cmdWord];
         if (!handler && command.includes('=')) {
             command = 'LET ' + command;
@@ -1472,9 +1475,14 @@ _cmdIf(command) {
         const result = this.evaluateExpression(condition);
         if (result) {
             if (this.debugMode) this.debugPrint(`IF ${condition} -> TRUE; THEN ${thenAction}`);
+            // Implicit GOTO: IF ... THEN <line-number>
+            const trimmed = thenAction.trim();
+            if (/^\d+$/.test(trimmed)) return parseInt(trimmed);
             return this._executeMultiStatement(thenAction);
         } else if (elseAction) {
             if (this.debugMode) this.debugPrint(`IF ${condition} -> FALSE; ELSE ${elseAction}`);
+            const trimmed = elseAction.trim();
+            if (/^\d+$/.test(trimmed)) return parseInt(trimmed);
             return this._executeMultiStatement(elseAction);
         }
     }
