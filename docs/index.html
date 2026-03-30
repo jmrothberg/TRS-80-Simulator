@@ -60,7 +60,7 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 </head>
 <body>
 <div id="container">
-<h1>JMR's TRS-80 Simulator v1.1</h1>
+<h1>JMR's TRS-80 Simulator v1.2</h1>
 <div id="screenFrame">
 <canvas id="screen" width="768" height="288" tabindex="0"></canvas>
 <!-- Hidden input to trigger virtual keyboard on mobile/tablet -->
@@ -173,6 +173,8 @@ constructor() {
     // Interpreter state
     this.scalarVariables = {};
     this.arrayVariables  = {};
+    // TRS-80 DIM A(I,J): name -> [maxDim1, maxDim2] for linear indexing
+    this.arrayDimensions = {};
     this.userFunctions   = {};
     this._lastRnd        = 0;
     this.forLoops        = {};
@@ -797,7 +799,7 @@ _handleInputReturn() {
     const arrayMatch = this.inputVariable.match(this._re.arrayMatch);
     if (arrayMatch) {
         const [, arrayName, indexExpr] = arrayMatch;
-        const index = Math.trunc(this.evaluateExpression(indexExpr));
+        const index = this._computeArrayLinearIndex(arrayName, indexExpr);
         if (this.arrayVariables[arrayName] && index >= 0 && index < this.arrayVariables[arrayName].length) {
             this.arrayVariables[arrayName][index] = arrayName.endsWith('$') ? userInput : this._parseNumeric(userInput);
         }
@@ -927,6 +929,7 @@ processImmediateCommand(command) {
     } else if (cmd === 'CLEAR') {
         this.scalarVariables = {};
         this.arrayVariables  = {};
+        this.arrayDimensions = {};
         this.userFunctions   = {};
         this._lastRnd        = 0;
         this.forLoops = {};
@@ -1135,6 +1138,7 @@ async executeNextLine() {
 newProgram() {
     this.scalarVariables = {};
     this.arrayVariables  = {};
+    this.arrayDimensions = {};
     this.userFunctions   = {};
     this._lastRnd        = 0;
     this.forLoops        = {};
@@ -1353,6 +1357,16 @@ _isWithinQuotes(s, pos) {
 //  LET — mirrors _cmd_let
 // ------------------------------------------------------------------
 _cmdLet(command) {
+    // LET A=1:B=2 — split on unquoted colons so values are not "INT(x):Y=..."
+    const body = command.substring(3).trim();
+    const segments = this._splitOnUnquotedColons(body);
+    if (segments.length > 1) {
+        for (const seg of segments) {
+            const s = seg.trim();
+            if (s) this.executeCommand(s);
+        }
+        return;
+    }
     const eqPos = command.indexOf('=', 3);
     if (eqPos === -1) return;
     const varName = command.substring(3, eqPos).trim();
@@ -1361,7 +1375,7 @@ _cmdLet(command) {
     const arrayMatch = varName.match(this._re.arrayMatch);
     if (arrayMatch) {
         const [, arrayName, indexExpr] = arrayMatch;
-        const index = Math.trunc(this.evaluateExpression(indexExpr));
+        const index = this._computeArrayLinearIndex(arrayName, indexExpr);
         if (this.arrayVariables[arrayName]) {
             if (index >= 0 && index < this.arrayVariables[arrayName].length) {
                 this.arrayVariables[arrayName][index] = arrayName.endsWith('$')
@@ -1419,16 +1433,60 @@ _findUnquotedComma(s) {
     return -1;
 }
 
+/** Split on first comma not inside parentheses; returns [left, right] or [s, null]. */
+_splitTopLevelComma(s) {
+    let depth = 0;
+    for (let i = 0; i < s.length; i++) {
+        const ch = s[i];
+        if (ch === '(') depth++;
+        else if (ch === ')') depth--;
+        else if (ch === ',' && depth === 0) {
+            return [s.substring(0, i).trim(), s.substring(i + 1).trim()];
+        }
+    }
+    return [s.trim(), null];
+}
+
+/** TRS-80 A(I,J): linear index = I * (maxJ + 1) + J */
+_computeArrayLinearIndex(arrayName, indexExpr) {
+    const t = indexExpr.trim();
+    const dims = this.arrayDimensions[arrayName];
+    if (dims === undefined) {
+        return Math.trunc(this._evalNested(t));
+    }
+    const [left, right] = this._splitTopLevelComma(t);
+    if (right === null) {
+        return Math.trunc(this._evalNested(t));
+    }
+    const d2max = dims[1];
+    const i = Math.trunc(this._evalNested(left));
+    const j = Math.trunc(this._evalNested(right));
+    return i * (d2max + 1) + j;
+}
+
 _cmdDim(command) {
     const m = command.match(this._re.dim);
     if (m) {
         const arrayName = m[1];
-        const size = Math.trunc(this.evaluateExpression(m[2]));
-        this.arrayVariables[arrayName] = arrayName.endsWith('$')
-            ? Array(size + 1).fill('')
-            : Array(size + 1).fill(0);
+        const sizeExpr = m[2].trim();
+        const commaPos = this._findUnquotedComma(sizeExpr);
+        if (commaPos === -1) {
+            const size = Math.trunc(this.evaluateExpression(sizeExpr));
+            this.arrayVariables[arrayName] = arrayName.endsWith('$')
+                ? Array(size + 1).fill('')
+                : Array(size + 1).fill(0);
+            delete this.arrayDimensions[arrayName];
+        } else {
+            const d1 = Math.trunc(this.evaluateExpression(sizeExpr.substring(0, commaPos).trim()));
+            const d2 = Math.trunc(this.evaluateExpression(sizeExpr.substring(commaPos + 1).trim()));
+            const total = (d1 + 1) * (d2 + 1);
+            this.arrayVariables[arrayName] = arrayName.endsWith('$')
+                ? Array(total).fill('')
+                : Array(total).fill(0);
+            this.arrayDimensions[arrayName] = [d1, d2];
+        }
         this._arrayPatterns[arrayName] = new RegExp('\\b' + arrayName.replace('$', '\\$') + '\\(');
-        this.debugPrint(`Array ${arrayName} dimensioned with size ${size + 1}`);
+        this.debugPrint(`Array ${arrayName} dimensioned (${this.arrayVariables[arrayName].length} elements)`);
     }
 }
 
@@ -1620,7 +1678,7 @@ _cmdRead(command) {
         const arrayMatch = varName.match(this._re.arrayMatch);
         if (arrayMatch) {
             const [, arrName, idxExpr] = arrayMatch;
-            const idx = Math.trunc(this.evaluateExpression(idxExpr));
+            const idx = this._computeArrayLinearIndex(arrName, idxExpr);
             if (this.arrayVariables[arrName] && idx >= 0 && idx < this.arrayVariables[arrName].length) {
                 this.arrayVariables[arrName][idx] = arrName.endsWith('$')
                     ? value.replace(/^['"]|['"]$/g, '') : this.evaluateExpression(value);
@@ -1799,9 +1857,15 @@ async _loadFromGitHub(selectEl, type) {
     if (!url) return;
     const filename = url.split('/').pop();
     try {
-        const response = await fetch(url);
+        // Avoid stale cached 404s: raw.githubusercontent.com can cache misses for a few minutes
+        // after a file is first pushed (browser may still show "no loading" / silent failure).
+        const bustUrl = url.includes('raw.githubusercontent.com')
+            ? `${url}${url.includes('?') ? '&' : '?'}_=${Date.now()}`
+            : url;
+        const response = await fetch(bustUrl, { cache: 'no-store', mode: 'cors' });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
-        const content = await response.text();
+        let content = await response.text();
+        if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
 
         if (type === 'bas') {
             const lines = this._sortProgramLines(content.trim().split('\n'));
@@ -1825,6 +1889,7 @@ async _loadFromGitHub(selectEl, type) {
         setTimeout(() => this._focusForInput(), 100);
     } catch (err) {
         this.printToScreen(`?LOAD ERROR: ${err.message}`);
+        if (this.debugMode) this.debugPrint(`LOAD failed: ${url} — ${err.message}`, 'error');
     }
     selectEl.selectedIndex = 0;
 }
@@ -1978,13 +2043,16 @@ _evalNested(expr) {
                 }
                 if (parenCount !== 0) break;
                 const indexExpr = expr.substring(startIndex, endIndex);
-                const index = Math.trunc(this._evalNested(indexExpr));
+                const index = this._computeArrayLinearIndex(arrayName, indexExpr);
                 if (index >= 0 && index < this.arrayVariables[arrayName].length) {
                     let replacement = this.arrayVariables[arrayName][index];
                     if (arrayName.endsWith('$') || typeof replacement === 'string')
                         replacement = `'${String(replacement).replace(/'/g, "\\'")}'`;
-                    expr = expr.substring(0, m.index) + String(replacement) + expr.substring(endIndex + 1);
-                    searchStart = m.index + String(replacement).length;
+                    else if (typeof replacement === 'number' && replacement < 0)
+                        replacement = `(${replacement})`;
+                    const repStr = String(replacement);
+                    expr = expr.substring(0, m.index) + repStr + expr.substring(endIndex + 1);
+                    searchStart = m.index + repStr.length;
                 } else {
                     // Capture full variable state for debugging
                     const vars = {};
@@ -2546,6 +2614,7 @@ _clearVariablesBtn() {
     }
     this.scalarVariables = {};
     this.arrayVariables  = {};
+    this.arrayDimensions = {};
     this.userFunctions   = {};
     this.forLoops = {};
     this.gosubStack = [];

@@ -119,7 +119,7 @@ class TRS80Simulator:
     # ============================================================
     def __init__(self, master):
         self.master = master
-        master.title("JMR's TRS-80 Simulator")
+        master.title("JMR's TRS-80 Simulator v1.2")
 
         # Detect if running on Raspberry Pi to disable 2x scaling
         self.is_raspberry_pi = self.detect_raspberry_pi()
@@ -240,6 +240,8 @@ class TRS80Simulator:
         # Initialize variables first (needed for cursor display)
         self.scalar_variables = {}
         self.array_variables = {}
+        # TRS-80 DIM A(I,J): maps array name -> (max_dim1, max_dim2) for linear indexing
+        self.array_dimensions = {}
         self.user_functions = {}
         self.current_line_index = 0
         self.program_running = False
@@ -1095,6 +1097,7 @@ class TRS80Simulator:
             self.stop_button.config(text="DISABLED", state=tk.DISABLED)
         self.scalar_variables = {}
         self.array_variables = {}
+        self.array_dimensions = {}
         self.user_functions = {}
         self.for_loops = {}
         self.gosub_stack = []
@@ -1138,6 +1141,7 @@ class TRS80Simulator:
         """
         self.scalar_variables = {}
         self.array_variables = {}
+        self.array_dimensions = {}
         self.user_functions = {}
         self.for_loops = {}
         self.current_line_index = 0
@@ -1335,7 +1339,7 @@ class TRS80Simulator:
             array_match = self._regex_cache['array_match'].match(self.input_variable)
             if array_match:
                 array_name, index = array_match.groups()
-                index = int(self.evaluate_expression(index))
+                index = self._compute_array_linear_index(array_name, index)
                 if array_name in self.array_variables:
                     if 0 <= index < len(self.array_variables[array_name]):
                         if array_name.endswith('$'):
@@ -2331,6 +2335,16 @@ class TRS80Simulator:
             self.cursor_row, self.cursor_col = original_row, original_col
 
     def _cmd_let(self, command):
+        # TRS-80: LET A=1:B=2 — split on unquoted colons so each assignment
+        # is evaluated alone. Otherwise value becomes "INT(x):Y=..." and eval fails.
+        body = command[3:].strip()
+        segments = self._split_on_unquoted_colons(body)
+        if len(segments) > 1:
+            for seg in segments:
+                seg = seg.strip()
+                if seg:
+                    self.execute_command(seg)
+            return
         parts = command[3:].split('=', 1)
         if len(parts) == 2:
             var_name = parts[0].strip()
@@ -2338,7 +2352,7 @@ class TRS80Simulator:
             array_match = self._regex_cache['array_match'].match(var_name)
             if array_match:
                 array_name, index = array_match.groups()
-                index = int(self.evaluate_expression(index))
+                index = self._compute_array_linear_index(array_name, index)
                 if array_name in self.array_variables:
                     if 0 <= index < len(self.array_variables[array_name]):
                         if array_name.endswith('$'):
@@ -2409,18 +2423,58 @@ class TRS80Simulator:
         self.cursor_row = 0
         self.cursor_col = 0
 
+    def _split_top_level_comma(self, s):
+        """Split on first comma not inside parentheses. Returns (left, right) or (s.strip(), None)."""
+        depth = 0
+        for i, ch in enumerate(s):
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            elif ch == ',' and depth == 0:
+                return s[:i].strip(), s[i + 1:].strip()
+        return s.strip(), None
+
+    def _compute_array_linear_index(self, array_name, index_expr):
+        """TRS-80 DIM A(I,J): linear index = I*(max_J+1)+J. Single-subscript arrays unchanged."""
+        index_expr = index_expr.strip()
+        dims = self.array_dimensions.get(array_name)
+        if dims is None:
+            return int(self._eval_nested(index_expr))
+        _d1max, d2max = dims
+        left, right = self._split_top_level_comma(index_expr)
+        if right is None:
+            return int(self._eval_nested(index_expr))
+        i = int(self._eval_nested(left))
+        j = int(self._eval_nested(right))
+        return i * (d2max + 1) + j
+
     def _cmd_dim(self, command):
         match = self._regex_cache['dim'].match(command)
         if match:
             array_name, size_expr = match.groups()
-            size = int(self.evaluate_expression(size_expr))
-            if array_name.endswith('$'):
-                self.array_variables[array_name] = [''] * (size + 1)
+            size_expr = size_expr.strip()
+            left, right = self._split_top_level_comma(size_expr)
+            if right is None:
+                size = int(self.evaluate_expression(size_expr))
+                if array_name.endswith('$'):
+                    self.array_variables[array_name] = [''] * (size + 1)
+                else:
+                    self.array_variables[array_name] = [0] * (size + 1)
+                if array_name in self.array_dimensions:
+                    del self.array_dimensions[array_name]
             else:
-                self.array_variables[array_name] = [0] * (size + 1)
+                d1 = int(self.evaluate_expression(left))
+                d2 = int(self.evaluate_expression(right))
+                total = (d1 + 1) * (d2 + 1)
+                if array_name.endswith('$'):
+                    self.array_variables[array_name] = [''] * total
+                else:
+                    self.array_variables[array_name] = [0] * total
+                self.array_dimensions[array_name] = (d1, d2)
             # Optimization 6: Pre-compile array pattern for this array
             self._array_patterns[array_name] = re.compile(rf'\b{re.escape(array_name)}\(')
-            self.debug_print(f"Array {array_name} dimensioned with size {size + 1}")
+            self.debug_print(f"Array {array_name} dimensioned ({len(self.array_variables[array_name])} elements)")
         else:
             self._error_sn(f"Invalid DIM command: {command}")
 
@@ -2644,7 +2698,7 @@ class TRS80Simulator:
                 array_match = self._regex_cache['array_match'].match(var)
                 if array_match:
                     array_name, index = array_match.groups()
-                    index = int(self.evaluate_expression(index))
+                    index = self._compute_array_linear_index(array_name, index)
                     if array_name in self.array_variables:
                         if 0 <= index < len(self.array_variables[array_name]):
                             if array_name.endswith('$'):
@@ -3014,7 +3068,8 @@ class TRS80Simulator:
 
         # --- Stage 4b: User-defined FN calls ---
         if 'FN' in expr and self.user_functions:
-            fn_re = re.compile(r'FN([A-Z])\(')
+            # \b so "INT" / "INSTR" cannot be read as FN + wrong letter; FNR( still matches.
+            fn_re = re.compile(r'\bFN([A-Z])\(')
             while True:
                 fn_match = fn_re.search(expr)
                 if not fn_match:
@@ -3081,17 +3136,20 @@ class TRS80Simulator:
                             raise ValueError(f"Mismatched parentheses in array reference: {array_name}")
 
                         index_expr = expr[start_index:end_index]
-                        index = int(self._eval_nested(index_expr))
+                        index = self._compute_array_linear_index(array_name, index_expr)
                         if 0 <= index < len(self.array_variables[array_name]):
                             replacement = self.array_variables[array_name][index]
                             if array_name.endswith('$') or isinstance(replacement, str):
                                 safe = str(replacement).replace("'", "\\'")
                                 replacement = f"'{safe}'"
-                            expr = expr[:match.start()] + str(replacement) + expr[end_index + 1:]
+                            elif isinstance(replacement, (int, float)) and replacement < 0:
+                                replacement = f"({replacement})"
+                            rep_str = str(replacement)
+                            expr = expr[:match.start()] + rep_str + expr[end_index + 1:]
                         else:
                             self._error_bs(array_name, index)
                             raise IndexError(f"Array index out of bounds: {array_name}[{index}]")
-                        start = match.start() + len(str(replacement))
+                        start = match.start() + len(rep_str)
 
         # --- Stage 6: Scalar variable substitution ---
         # Split on quoted strings so replacements don't touch literals.
@@ -3118,6 +3176,8 @@ class TRS80Simulator:
                 part_quote_map = self._build_quote_map(parts[i])
 
                 for var in sorted_vars:
+                    if var not in self.scalar_variables:
+                        continue
                     value = self.scalar_variables[var]
                     new_parts = []
                     last_end = 0
@@ -3746,6 +3806,7 @@ class TRS80Simulator:
         elif cmd == "CLEAR":
             self.scalar_variables = {}
             self.array_variables = {}
+            self.array_dimensions = {}
             self.for_loops = {}
             self.gosub_stack = []
             self.data_pointer = 0
