@@ -247,7 +247,7 @@ class TRS80Simulator:
         self.program_running = False
         self.program_paused = False
         self.waiting_for_input = False
-        self.input_variable = None
+        self.input_variables = None
         self.gosub_stack = []
         self.for_loops = {}
         self.data_values = []
@@ -470,7 +470,6 @@ class TRS80Simulator:
         """
         self._regex_cache['array_match'] = re.compile(r'(\w+\$?)\((.+)\)')
         self._regex_cache['print_at'] = re.compile(r'PRINT@\s*([^,;]+)\s*,?\s*(.*)')
-        self._regex_cache['input_prompt'] = re.compile(r'INPUT\s*"(.*)"\s*;\s*(\w+\$?(?:\(.*?\))?)')
         self._regex_cache['if_then'] = re.compile(r'IF\s+(.*?)\s+THEN\s+(.*?)(\s+ELSE\s+(.*))?$')
         self._regex_cache['for_loop'] = re.compile(r'FOR\s+(\w+)\s*=\s*(.+?)\s+TO\s+(.+?)(\s+STEP\s+(.+))?$')
         self._regex_cache['on_goto'] = re.compile(r'ON\s+(.*?)\s+GOTO\s+(.*)')
@@ -910,7 +909,7 @@ class TRS80Simulator:
             self.program_running = False
             self.program_paused = False
             self.waiting_for_input = False
-            self.input_variable = None
+            self.input_variables = None
             self.screen.unbind("<Key>")
             self.screen.unbind("<Return>")
             self.enable_immediate_mode()
@@ -1095,6 +1094,8 @@ class TRS80Simulator:
             self.program_running = False
             self.program_paused = False
             self.stop_button.config(text="DISABLED", state=tk.DISABLED)
+        self.waiting_for_input = False
+        self.input_variables = None
         self.scalar_variables = {}
         self.array_variables = {}
         self.array_dimensions = {}
@@ -1146,7 +1147,7 @@ class TRS80Simulator:
         self.for_loops = {}
         self.current_line_index = 0
         self.waiting_for_input = False
-        self.input_variable = None
+        self.input_variables = None
         self.gosub_stack = []
         self.program_running = False
         self.program_paused = False
@@ -1335,40 +1336,10 @@ class TRS80Simulator:
             user_input = getattr(self, '_input_buffer', '')
 
             self.debug_print(f"User input received: {user_input!r}")  # Debug print
-            
-            array_match = self._regex_cache['array_match'].match(self.input_variable)
-            if array_match:
-                array_name, index = array_match.groups()
-                index = self._compute_array_linear_index(array_name, index)
-                if array_name in self.array_variables:
-                    if 0 <= index < len(self.array_variables[array_name]):
-                        if array_name.endswith('$'):
-                            self.array_variables[array_name][index] = user_input
-                        else:
-                            try:
-                                self.array_variables[array_name][index] = int(user_input)
-                            except ValueError:
-                                try:
-                                    self.array_variables[array_name][index] = float(user_input)
-                                except ValueError:
-                                    self.debug_print(f"Error: Invalid numeric input for {array_name}[{index}]", 'error')
-                    else:
-                        self.debug_print(f"Error: Index {index} out of bounds for array {array_name}", 'error')
-                else:
-                    self.debug_print(f"Error: Array {array_name} not defined", 'error')
-            else:
-                if self.input_variable.endswith('$'):
-                    self.scalar_variables[self.input_variable] = user_input
-                else:
-                    try:
-                        self.scalar_variables[self.input_variable] = int(user_input)
-                    except ValueError:
-                        try:
-                            self.scalar_variables[self.input_variable] = float(user_input)
-                        except ValueError:
-                            self.debug_print(f"Error: Invalid numeric input for {self.input_variable}", 'error')
-            
-            self.debug_print(f"Variable {self.input_variable} set to: {self.scalar_variables.get(self.input_variable, self.array_variables.get(self.input_variable))}")  # Debug print
+
+            parts = self._split_input_line_to_values(user_input, len(self.input_variables))
+            for var_spec, val in zip(self.input_variables, parts):
+                self._assign_input_value(var_spec, val)
             
             # Move to the next line
             self.cursor_row += 1
@@ -1377,7 +1348,7 @@ class TRS80Simulator:
                 self._scroll_screen_up()
 
             self.waiting_for_input = False
-            self.input_variable = None
+            self.input_variables = None
             self._input_buffer = ""
             if hasattr(self, 'input_start_pos'):
                 delattr(self, 'input_start_pos')  # Remove the input start position attribute
@@ -1408,6 +1379,8 @@ class TRS80Simulator:
             # Stop the program
             self.program_running = False
             self.program_paused = False
+            self.waiting_for_input = False
+            self.input_variables = None
             self.stop_button.config(text="STOP", state=tk.DISABLED)
             self.step_button.config(state=tk.DISABLED)
             
@@ -1789,7 +1762,7 @@ class TRS80Simulator:
         report.append(f"  Stepping Mode: {'YES' if self.stepping else 'NO'}")
         report.append(f"  Waiting for Input: {'YES' if self.waiting_for_input else 'NO'}")
         if self.waiting_for_input:
-            report.append(f"  Input Variable: {self.input_variable}")
+            report.append(f"  Input Variables: {self.input_variables}")
         report.append("")
         
         # Current program line context
@@ -1921,7 +1894,7 @@ class TRS80Simulator:
         if self.program_running and self.current_line_index >= len(self.sorted_program):
             runtime_issues.append("Program appears to be running but has reached the end")
         
-        if self.waiting_for_input and not self.input_variable:
+        if self.waiting_for_input and not self.input_variables:
             runtime_issues.append("Program is waiting for input but no input variable is set")
         
         if self.for_loops:
@@ -2435,6 +2408,93 @@ class TRS80Simulator:
                 return s[:i].strip(), s[i + 1:].strip()
         return s.strip(), None
 
+    def _split_all_top_level_commas(self, s):
+        """Split on commas not inside parentheses or string literals (LEFT$/RIGHT$/MID$/ etc.)."""
+        quote_map = self._build_quote_map(s)
+        parts = []
+        depth = 0
+        start = 0
+        for i, ch in enumerate(s):
+            if quote_map[i]:
+                continue
+            if ch == '(':
+                depth += 1
+            elif ch == ')':
+                depth -= 1
+            elif ch == ',' and depth == 0:
+                parts.append(s[start:i].strip())
+                start = i + 1
+        parts.append(s[start:].strip())
+        return parts
+
+    def _parse_input_command(self, command):
+        """Return (prompt_or_None, list of variable specs) for INPUT [\"prompt\";] v1, v2, ..."""
+        cmd = command.strip()
+        if not cmd.upper().startswith('INPUT'):
+            return None, []
+        rest = cmd[5:].lstrip()
+        prompt = None
+        if rest.startswith('"'):
+            i = 1
+            while i < len(rest) and rest[i] != '"':
+                i += 1
+            prompt = rest[1:i]
+            rest = rest[i + 1:].lstrip()
+            if not rest.startswith(';'):
+                return None, []
+            rest = rest[1:].lstrip()
+        if not rest:
+            return prompt, []
+        parts = self._split_all_top_level_commas(rest)
+        return prompt, [p.strip() for p in parts if p.strip()]
+
+    def _split_input_line_to_values(self, user_input, n_vars):
+        """Split one INPUT response into n values (comma-separated if n > 1)."""
+        if n_vars <= 1:
+            return [user_input.strip()] if user_input is not None else ['']
+        s = user_input.strip()
+        if not s:
+            return [''] * n_vars
+        parts = self._split_all_top_level_commas(s)
+        while len(parts) < n_vars:
+            parts.append('')
+        return parts[:n_vars]
+
+    def _assign_input_value(self, var_spec, value_str):
+        """Store one INPUT token into a scalar, string, or array element."""
+        var_spec = var_spec.strip()
+        m = self._regex_cache['array_match'].fullmatch(var_spec)
+        if m:
+            array_name, index_expr = m.groups()
+            index = self._compute_array_linear_index(array_name, index_expr)
+            if array_name in self.array_variables:
+                if 0 <= index < len(self.array_variables[array_name]):
+                    if array_name.endswith('$'):
+                        self.array_variables[array_name][index] = value_str
+                    else:
+                        try:
+                            self.array_variables[array_name][index] = int(value_str)
+                        except ValueError:
+                            try:
+                                self.array_variables[array_name][index] = float(value_str)
+                            except ValueError:
+                                self.debug_print(f"Error: Invalid numeric input for {array_name}[{index}]", 'error')
+                else:
+                    self.debug_print(f"Error: Index {index} out of bounds for array {array_name}", 'error')
+            else:
+                self.debug_print(f"Error: Array {array_name} not defined", 'error')
+        else:
+            if var_spec.endswith('$'):
+                self.scalar_variables[var_spec] = value_str
+            else:
+                try:
+                    self.scalar_variables[var_spec] = int(value_str) if value_str.strip() else 0
+                except ValueError:
+                    try:
+                        self.scalar_variables[var_spec] = float(value_str)
+                    except ValueError:
+                        self.debug_print(f"Error: Invalid numeric input for {var_spec}", 'error')
+
     def _compute_array_linear_index(self, array_name, index_expr):
         """TRS-80 DIM A(I,J): linear index = I*(max_J+1)+J. Single-subscript arrays unchanged."""
         index_expr = index_expr.strip()
@@ -2498,17 +2558,18 @@ class TRS80Simulator:
         self.debug_print(f"Wrote to tape: {data}")
 
     def _cmd_input(self, command):
-        match = self._regex_cache['input_prompt'].match(command)
-        if match:
-            prompt, var_name = match.groups()
+        prompt, var_names = self._parse_input_command(command)
+        if not var_names:
+            self.debug_print("INPUT: no variables", 'warning')
+            return
+        if prompt is not None:
             self.print_to_screen(prompt, end='')
-            self.debug_print(f"INPUT {var_name} prompt={prompt!r}")
+            self.debug_print(f"INPUT {var_names} prompt={prompt!r}")
         else:
-            var_name = command[5:].strip()
             self.print_to_screen("? ", end='')
-            self.debug_print(f"INPUT {var_name}")
+            self.debug_print(f"INPUT {var_names}")
         self.waiting_for_input = True
-        self.input_variable = var_name
+        self.input_variables = var_names
         self._input_buffer = ""  # Accumulate typed chars directly
         self.initial_start_pos = f"{self.cursor_row + 1}.{self.cursor_col}"
         self.screen.config(state=tk.NORMAL)
@@ -3291,14 +3352,20 @@ class TRS80Simulator:
 
     def _func_point(self, inner_value, inner_expr):
         try:
-            x, y = map(lambda v: int(self._eval_nested(v.strip())), inner_expr.split(','))
+            parts = self._split_all_top_level_commas(inner_expr)
+            if len(parts) < 2:
+                return 0
+            x, y = map(lambda v: int(self._eval_nested(v.strip())), parts[:2])
             return self.get_pixel(x - 1, y - 1)
         except ValueError as e:
             self.debug_print(f"Error in POINT function: {str(e)}", 'error')
             return 0
 
     def _func_string(self, inner_value, inner_expr):
-        count, char = inner_expr.split(',')
+        parts = self._split_all_top_level_commas(inner_expr)
+        if len(parts) < 2:
+            return "''"
+        count, char = parts[0], parts[1]
         count = int(self._eval_nested(count.strip()))
         char = self._eval_nested(char.strip())
         if isinstance(char, str):
@@ -3309,17 +3376,25 @@ class TRS80Simulator:
         return "'" + result.replace("'", "\\'") + "'"
 
     def _func_left(self, inner_value, inner_expr):
-        string, length = map(self._eval_nested, inner_expr.split(','))
+        parts = self._split_all_top_level_commas(inner_expr)
+        if len(parts) < 2:
+            return "''"
+        string, length = map(self._eval_nested, parts[:2])
         result = str(string)[:int(length)]
         return "'" + result.replace("'", "\\'") + "'"
 
     def _func_right(self, inner_value, inner_expr):
-        string, length = map(self._eval_nested, inner_expr.split(','))
+        parts = self._split_all_top_level_commas(inner_expr)
+        if len(parts) < 2:
+            return "''"
+        string, length = map(self._eval_nested, parts[:2])
         result = str(string)[-int(length):]
         return "'" + result.replace("'", "\\'") + "'"
 
     def _func_mid(self, inner_value, inner_expr):
-        parts = inner_expr.split(',')
+        parts = self._split_all_top_level_commas(inner_expr)
+        if len(parts) < 2:
+            return "''"
         string, start = map(self._eval_nested, parts[:2])
         start = int(start) - 1
         if len(parts) > 2:
@@ -3330,7 +3405,7 @@ class TRS80Simulator:
         return "'" + result.replace("'", "\\'") + "'"
 
     def _func_instr(self, inner_value, inner_expr):
-        parts = inner_expr.split(',')
+        parts = self._split_all_top_level_commas(inner_expr)
         if len(parts) == 2:
             string, substring = map(self._eval_nested, parts)
             start = 1

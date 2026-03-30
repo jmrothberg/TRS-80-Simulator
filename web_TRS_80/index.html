@@ -47,6 +47,8 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 #debugText { width: 100%; height: 150px; background: #111; color: #aaa; border: 1px solid #444; font-family: 'Courier New', monospace; font-size: 11px; padding: 4px; resize: vertical; }
 #debugBar { display: flex; gap: 4px; margin-bottom: 4px; }
 #debugBar button { background: #383838; color: #bbb; border: 1px solid #555; padding: 2px 8px; font-size: 11px; cursor: pointer; border-radius: 2px; }
+#variablesPanel { background: #1a1a1a; border: 1px solid #555; border-radius: 4px; padding: 6px; margin-top: 6px; }
+#variablesText { width: 100%; height: 150px; background: #111; color: #aaa; border: 1px solid #444; font-family: 'Courier New', monospace; font-size: 11px; padding: 4px; resize: vertical; }
 #fileInput { display: none; }
 #tapeInput { display: none; }
 /* GitHub file dropdowns */
@@ -74,7 +76,7 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 </head>
 <body>
 <div id="container">
-<h1>JMR's TRS-80 Simulator v1.2</h1>
+<h1>JMR's TRS-80 Simulator v1.4</h1>
 <div id="screenFrame">
 <canvas id="screen" width="768" height="288" tabindex="0"></canvas>
 <!-- Hidden input to trigger virtual keyboard on mobile/tablet -->
@@ -96,6 +98,7 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 <select id="selTape"><option value="">-- Tape Files --</option></select>
 <button id="btnCopy">Copy</button>
 <button id="btnDebug">Debug: ON</button>
+<button id="btnVariables">Variables: ON</button>
 <button id="btnHelp">Help</button>
 </div>
 <div id="debugPanel" style="display:none">
@@ -104,6 +107,9 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 <button id="btnDebugList">List Preprocessed</button>
 </div>
 <textarea id="debugText" readonly></textarea>
+</div>
+<div id="variablesPanel" style="display:none">
+<textarea id="variablesText" readonly></textarea>
 </div>
 </div>
 <div id="helpOverlay">
@@ -168,6 +174,9 @@ constructor() {
     this.inputArea  = document.getElementById('inputArea');
     this.debugText  = document.getElementById('debugText');
     this.debugPanel = document.getElementById('debugPanel');
+    this.variablesText  = document.getElementById('variablesText');
+    this.variablesPanel = document.getElementById('variablesPanel');
+    this.variablesWindowOpen = false;
 
     this.pixelSize = PIXEL_SIZE;
     this.charW = PIXEL_SIZE * 2;   // 12
@@ -199,7 +208,7 @@ constructor() {
     this.programRunning  = false;
     this.programPaused   = false;
     this.waitingForInput = false;
-    this.inputVariable   = null;
+    this.inputVariables  = null;
     this.lastKeyPressed  = null;
     this.lastKeyTime     = 0;
     this.keyCheckInterval = 0.05;
@@ -295,7 +304,6 @@ _compileRegexPatterns() {
     this._re = {};
     this._re.arrayMatch   = /^(\w+\$?)\((.+)\)$/;
     this._re.printAt      = /^PRINT@\s*([^,;]+)\s*,?\s*(.*)/;
-    this._re.inputPrompt  = /^INPUT\s*"(.*)"\s*;\s*(\w+\$?(?:\(.*?\))?)$/;
     this._re.ifThen       = /^IF\s+(.*?)\s+THEN\s+(.*?)(\s+ELSE\s+(.*))?$/;
     this._re.forLoop      = /^FOR\s+(\w+)\s*=\s*(.+?)\s+TO\s+(.+?)(\s+STEP\s+(.+))?$/;
     this._re.onGoto       = /^ON\s+(.*?)\s+GOTO\s+(.*)/;
@@ -329,6 +337,7 @@ _wireButtons() {
     document.getElementById('btnTape').onclick  = () => this._triggerTapeLoad();
     document.getElementById('btnCopy').onclick  = () => this.copyScreen();
     document.getElementById('btnDebug').onclick = () => this.toggleDebug();
+    document.getElementById('btnVariables').onclick = () => this.toggleVariables();
     document.getElementById('btnDebugClear').onclick = () => { this.debugText.value = ''; };
     document.getElementById('btnDebugList').onclick  = () => this._listPreprocessed();
     document.getElementById('btnHelp').onclick       = () => this._showHelp();
@@ -428,7 +437,7 @@ Program Statements:
   PRINT@ pos, expr    (screen position 0-1023)
   PRINT TAB(n); expr
   LET var = expr      (LET is optional)
-  INPUT ["prompt";] var
+  INPUT ["prompt";] var [, var2 ...]
   GOTO line
   ON expr GOTO line1, line2, ...
   IF cond THEN action [ELSE action]
@@ -717,6 +726,7 @@ _handleKeyDown(event) {
         this.programRunning = false;
         this.programPaused  = false;
         this.waitingForInput = false;
+        this.inputVariables = null;
         this.enableImmediateMode();
         event.preventDefault();
         return;
@@ -790,7 +800,7 @@ _handleInputBackspace() {
 }
 
 _handleInputReturn() {
-    if (!this.waitingForInput) return;
+    if (!this.waitingForInput || !this.inputVariables || !this.inputVariables.length) return;
 
     let userInput = '';
     const sRow = this.inputStartRow;
@@ -809,20 +819,9 @@ _handleInputReturn() {
     userInput = userInput.trimEnd();
     this.debugPrint(`User input received: ${userInput}`);
 
-    // Store value in variable
-    const arrayMatch = this.inputVariable.match(this._re.arrayMatch);
-    if (arrayMatch) {
-        const [, arrayName, indexExpr] = arrayMatch;
-        const index = this._computeArrayLinearIndex(arrayName, indexExpr);
-        if (this.arrayVariables[arrayName] && index >= 0 && index < this.arrayVariables[arrayName].length) {
-            this.arrayVariables[arrayName][index] = arrayName.endsWith('$') ? userInput : this._parseNumeric(userInput);
-        }
-    } else {
-        if (this.inputVariable.endsWith('$')) {
-            this.scalarVariables[this.inputVariable] = userInput;
-        } else {
-            this.scalarVariables[this.inputVariable] = this._parseNumeric(userInput);
-        }
+    const parts = this._splitInputLineValues(userInput, this.inputVariables.length);
+    for (let i = 0; i < this.inputVariables.length; i++) {
+        this._assignInputValue(this.inputVariables[i], parts[i] != null ? parts[i] : '');
     }
 
     this.cursorRow++;
@@ -830,9 +829,10 @@ _handleInputReturn() {
     if (this.cursorRow >= ROWS) this._scrollScreenUp();
 
     this.waitingForInput = false;
-    this.inputVariable = null;
+    this.inputVariables = null;
     this.currentLineIndex++;
 
+    if (this.variablesWindowOpen) this._updateVariablesContent();
     if (this.currentLineIndex >= this.sortedProgram.length) {
         this.programRunning = false;
         this._setStopBtn(false);
@@ -1080,6 +1080,7 @@ runProgram() {
     this._setStopBtn(true);
     this.debugPrint('Starting program execution');
     this._focusForInput();
+    if (this.variablesWindowOpen) this._updateVariablesContent();
     if (!this.stepping) this.executeNextLine();
 }
 
@@ -1091,6 +1092,7 @@ async executeNextLine() {
             this._setStopBtn(false);
             this._flushGraphics();
             this.debugPrint('Program execution completed');
+            if (this.variablesWindowOpen) this._updateVariablesContent();
             if (!this.immediateMode) this.enableImmediateMode();
             this._focusForInput();
             return;
@@ -1124,10 +1126,12 @@ async executeNextLine() {
                 } else {
                     this._errorUl(result);
                     this.programRunning = false;
+                    if (this.variablesWindowOpen) this._updateVariablesContent();
                     return;
                 }
             } else if (this.waitingForInput) {
                 this._flushGraphics();
+                if (this.variablesWindowOpen) this._updateVariablesContent();
                 return;
             } else {
                 this.currentLineIndex++;
@@ -1137,6 +1141,7 @@ async executeNextLine() {
         }
 
         updateCounter++;
+        if (updateCounter % 100 === 0 && this.variablesWindowOpen) this._updateVariablesContent();
         if (this._usesInkey || updateCounter % 20 === 0) {
             await new Promise(r => setTimeout(r, 0));
         }
@@ -1144,9 +1149,11 @@ async executeNextLine() {
 
         if (this.stepping) {
             this._flushGraphics();
+            if (this.variablesWindowOpen) this._updateVariablesContent();
             return;
         }
     }
+    if (this.variablesWindowOpen) this._updateVariablesContent();
 }
 
 newProgram() {
@@ -1158,7 +1165,7 @@ newProgram() {
     this.forLoops        = {};
     this.currentLineIndex = 0;
     this.waitingForInput = false;
-    this.inputVariable   = null;
+    this.inputVariables  = null;
     this.gosubStack      = [];
     this.programRunning  = false;
     this.programPaused   = false;
@@ -1181,6 +1188,7 @@ newProgram() {
     this._lastEvalSubstituted = '';
     this.commandBuffer = '';
     this.debugPrint('New program initialized.');
+    if (this.variablesWindowOpen) this._updateVariablesContent();
 }
 
 // ------------------------------------------------------------------
@@ -1461,6 +1469,70 @@ _splitTopLevelComma(s) {
     return [s.trim(), null];
 }
 
+/** Split on every comma at paren depth 0 (and not inside quotes). Used for LEFT$/RIGHT$/MID$/ etc. */
+_splitAllTopLevelCommas(s) {
+    const quoteMap = this._buildQuoteMap(s);
+    const parts = [];
+    let depth = 0;
+    let start = 0;
+    for (let i = 0; i < s.length; i++) {
+        if (quoteMap[i]) continue;
+        const ch = s[i];
+        if (ch === '(') depth++;
+        else if (ch === ')') depth--;
+        else if (ch === ',' && depth === 0) {
+            parts.push(s.substring(start, i).trim());
+            start = i + 1;
+        }
+    }
+    parts.push(s.substring(start).trim());
+    return parts;
+}
+
+/** Parse INPUT ["prompt";] var1, var2, ... — returns { prompt, variables }. */
+_parseInputCommand(command) {
+    const cmd = command.trim();
+    if (!/^INPUT/i.test(cmd)) return { prompt: null, variables: [] };
+    let rest = cmd.slice(5).trimStart();
+    let prompt = null;
+    if (rest.startsWith('"')) {
+        let i = 1;
+        while (i < rest.length && rest[i] !== '"') i++;
+        prompt = rest.slice(1, i);
+        rest = rest.slice(i + 1).trimStart();
+        if (!rest.startsWith(';')) return { prompt: null, variables: [] };
+        rest = rest.slice(1).trimStart();
+    }
+    if (!rest) return { prompt, variables: [] };
+    const variables = this._splitAllTopLevelCommas(rest).map(s => s.trim()).filter(Boolean);
+    return { prompt, variables };
+}
+
+/** One line of user input → one string per INPUT variable (comma-split if n>1). */
+_splitInputLineValues(userInput, numVars) {
+    if (numVars <= 1) return [userInput != null ? String(userInput).trim() : ''];
+    const s = String(userInput).trim();
+    if (!s) return Array(numVars).fill('');
+    let parts = this._splitAllTopLevelCommas(s);
+    while (parts.length < numVars) parts.push('');
+    return parts.slice(0, numVars).map(p => p.trim());
+}
+
+_assignInputValue(varSpec, valueStr) {
+    const spec = varSpec.trim();
+    const arrayMatch = spec.match(this._re.arrayMatch);
+    if (arrayMatch) {
+        const [, arrayName, indexExpr] = arrayMatch;
+        const index = this._computeArrayLinearIndex(arrayName, indexExpr);
+        if (this.arrayVariables[arrayName] && index >= 0 && index < this.arrayVariables[arrayName].length) {
+            this.arrayVariables[arrayName][index] = arrayName.endsWith('$') ? valueStr : this._parseNumeric(valueStr);
+        }
+    } else {
+        if (spec.endsWith('$')) this.scalarVariables[spec] = valueStr;
+        else this.scalarVariables[spec] = this._parseNumeric(valueStr);
+    }
+}
+
 /** TRS-80 A(I,J): linear index = I * (maxJ + 1) + J */
 _computeArrayLinearIndex(arrayName, indexExpr) {
     const t = indexExpr.trim();
@@ -1519,17 +1591,12 @@ _cmdDef(command) {
 //  INPUT — mirrors _cmd_input
 // ------------------------------------------------------------------
 _cmdInput(command) {
-    const m = command.match(this._re.inputPrompt);
-    let varName;
-    if (m) {
-        this.printToScreen(m[1], '');
-        varName = m[2];
-    } else {
-        varName = command.substring(5).trim();
-        this.printToScreen('? ', '');
-    }
+    const { prompt, variables } = this._parseInputCommand(command);
+    if (!variables.length) return;
+    if (prompt != null) this.printToScreen(prompt, '');
+    else this.printToScreen('? ', '');
     this.waitingForInput = true;
-    this.inputVariable = varName;
+    this.inputVariables = variables;
     this.inputStartRow = this.cursorRow;
     this.inputStartCol = this.cursorCol;
     this._focusForInput();
@@ -2308,7 +2375,8 @@ _funcStr(v) {
 
 _funcPoint(innerExpr) {
     try {
-        const parts = innerExpr.split(',');
+        const parts = this._splitAllTopLevelCommas(innerExpr);
+        if (parts.length < 2) return 0;
         const x = Math.trunc(this._evalNested(parts[0].trim()));
         const y = Math.trunc(this._evalNested(parts[1].trim()));
         return this.getPixel(x - 1, y - 1);
@@ -2316,7 +2384,8 @@ _funcPoint(innerExpr) {
 }
 
 _funcString(innerExpr) {
-    const parts = innerExpr.split(',');
+    const parts = this._splitAllTopLevelCommas(innerExpr);
+    if (parts.length < 2) return "''";
     const count = Math.trunc(this._evalNested(parts[0].trim()));
     let char = this._evalNested(parts[1].trim());
     if (typeof char === 'number') char = String.fromCharCode(char);
@@ -2325,21 +2394,24 @@ _funcString(innerExpr) {
 }
 
 _funcLeft(innerExpr) {
-    const parts = innerExpr.split(',');
+    const parts = this._splitAllTopLevelCommas(innerExpr);
+    if (parts.length < 2) return "''";
     const str = String(this._evalNested(parts[0].trim()));
     const len = Math.trunc(this._evalNested(parts[1].trim()));
     return "'" + str.substring(0, len).replace(/'/g, "\\'") + "'";
 }
 
 _funcRight(innerExpr) {
-    const parts = innerExpr.split(',');
+    const parts = this._splitAllTopLevelCommas(innerExpr);
+    if (parts.length < 2) return "''";
     const str = String(this._evalNested(parts[0].trim()));
     const len = Math.trunc(this._evalNested(parts[1].trim()));
     return "'" + str.slice(-len).replace(/'/g, "\\'") + "'";
 }
 
 _funcMid(innerExpr) {
-    const parts = innerExpr.split(',');
+    const parts = this._splitAllTopLevelCommas(innerExpr);
+    if (parts.length < 2) return "''";
     const str   = String(this._evalNested(parts[0].trim()));
     const start = Math.trunc(this._evalNested(parts[1].trim())) - 1;
     if (parts.length > 2) {
@@ -2350,7 +2422,7 @@ _funcMid(innerExpr) {
 }
 
 _funcInstr(innerExpr) {
-    const parts = innerExpr.split(',');
+    const parts = this._splitAllTopLevelCommas(innerExpr);
     let startPos = 1, str, find;
     if (parts.length === 2) {
         str  = String(this._evalNested(parts[0].trim()));
@@ -2443,14 +2515,39 @@ getPixel(x, y) {
 // ------------------------------------------------------------------
 //  File I/O — SAVE / LOAD
 // ------------------------------------------------------------------
-saveProgram() {
+async saveProgram() {
     const lines = this._sortProgramLines(this.inputArea.value.trim().split('\n'));
     this.inputArea.value = lines.join('\n');
     this.storedProgram = lines;
-    const blob = new Blob([lines.join('\n') + '\n'], { type: 'text/plain' });
+    const text = lines.join('\n') + '\n';
+    const blob = new Blob([text], { type: 'text/plain' });
+    const defaultName = 'program.bas';
+
+    if (typeof window.showSaveFilePicker === 'function') {
+        try {
+            const handle = await window.showSaveFilePicker({
+                suggestedName: defaultName,
+                types: [{ description: 'BASIC program', accept: { 'text/plain': ['.bas', '.txt'] } }],
+            });
+            const writable = await handle.createWritable();
+            await writable.write(blob);
+            await writable.close();
+            return;
+        } catch (e) {
+            if (e && e.name === 'AbortError') return;
+        }
+    }
+
+    let name = typeof prompt === 'function'
+        ? prompt('Save as (filename):', defaultName)
+        : defaultName;
+    if (name === null) return;
+    name = String(name).trim().replace(/^.*[/\\]/, '') || defaultName;
+    if (!name.includes('.')) name += '.bas';
+
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
-    a.download = 'program.bas';
+    a.download = name;
     a.click();
     URL.revokeObjectURL(a.href);
 }
@@ -2496,7 +2593,111 @@ toggleDebug() {
     } else {
         btn.textContent = 'Debug: ON';
         this.debugPanel.style.display = 'none';
+        // Match Python: closing debug hides the variables panel too
+        if (this.variablesWindowOpen) {
+            this.variablesWindowOpen = false;
+            document.getElementById('btnVariables').textContent = 'Variables: ON';
+            this.variablesPanel.style.display = 'none';
+        }
     }
+}
+
+toggleVariables() {
+    this.variablesWindowOpen = !this.variablesWindowOpen;
+    const btn = document.getElementById('btnVariables');
+    if (this.variablesWindowOpen) {
+        btn.textContent = 'Variables: OFF';
+        this.variablesPanel.style.display = 'block';
+        this._updateVariablesContent();
+    } else {
+        btn.textContent = 'Variables: ON';
+        this.variablesPanel.style.display = 'none';
+    }
+}
+
+_formatStateValue(value) {
+    if (typeof value === 'string') return JSON.stringify(value);
+    if (typeof value === 'number' && value === Math.trunc(value)) return String(Math.trunc(value));
+    return String(value);
+}
+
+_summarizeStateArray(name, value) {
+    if (!Array.isArray(value)) return `${name} = ${this._formatStateValue(value)}`;
+    const active = name.endsWith('$')
+        ? value.map((v, i) => (v !== '' ? [i, v] : null)).filter(Boolean)
+        : value.map((v, i) => (v !== 0 ? [i, v] : null)).filter(Boolean);
+    if (!active.length) return `${name}(${value.length - 1}) = [all default]`;
+    const preview = active.slice(0, 8).map(([i, v]) => `[${i}]=${this._formatStateValue(v)}`).join(', ');
+    const extra = active.length > 8 ? `, ... (${active.length} used)` : '';
+    return `${name}(${value.length - 1}) = ${preview}${extra}`;
+}
+
+_updateVariablesContent() {
+    if (!this.variablesWindowOpen) return;
+    const lines = [];
+    lines.push('STATUS');
+    lines.push(`Program Running: ${this.programRunning}`);
+    lines.push(`Program Paused: ${this.programPaused}`);
+    lines.push(`Stepping Mode: ${this.stepping}`);
+    lines.push(`Last Key Pressed: ${this.lastKeyPressed}`);
+    lines.push(`Data Pointer: ${this.dataPointer}`);
+    lines.push('');
+    lines.push('CURRENT LINE');
+    if (this.currentLineIndex >= 0 && this.currentLineIndex < this._lineNumbers.length) {
+        lines.push(`Line Number: ${this._lineNumbers[this.currentLineIndex]}`);
+        lines.push(`Command: ${this._lineCommands[this.currentLineIndex]}`);
+        lines.push('');
+    } else {
+        lines.push('Program execution completed or not started');
+        lines.push('');
+    }
+    lines.push('SCALAR VARIABLES');
+    const scalarKeys = Object.keys(this.scalarVariables).sort();
+    if (scalarKeys.length) {
+        for (const v of scalarKeys) {
+            lines.push(`${v} = ${this._formatStateValue(this.scalarVariables[v])}`);
+        }
+    } else {
+        lines.push('None');
+    }
+    lines.push('');
+    lines.push('ARRAYS');
+    const arrayKeys = Object.keys(this.arrayVariables).sort();
+    if (arrayKeys.length) {
+        for (const v of arrayKeys) {
+            lines.push(this._summarizeStateArray(v, this.arrayVariables[v]));
+        }
+    } else {
+        lines.push('None');
+    }
+    lines.push('');
+    lines.push('ACTIVE FOR LOOPS');
+    const forKeys = Object.keys(this.forLoops);
+    if (forKeys.length) {
+        for (const v of forKeys) {
+            const loop = this.forLoops[v];
+            lines.push(`${v}: current=${loop.current} start=${loop.start} end=${loop.end} step=${loop.step} next=${loop.nextLineNumber}`);
+        }
+    } else {
+        lines.push('None');
+    }
+    lines.push('');
+    lines.push('GOSUB STACK');
+    if (this.gosubStack.length) {
+        const stackLines = this.gosubStack.map(entry => {
+            let returnIndex = entry;
+            if (typeof entry === 'object' && entry !== null && 'idx' in entry) returnIndex = entry.idx;
+            if (returnIndex >= 0 && returnIndex < this._lineNumbers.length) {
+                return String(this._lineNumbers[returnIndex]);
+            }
+            return String(returnIndex);
+        });
+        lines.push(stackLines.join(' -> '));
+    } else {
+        lines.push('Empty');
+    }
+    this.variablesText.value = lines.join('\n');
+    this.variablesText.scrollTop = 0;
 }
 
 debugPrint(message, level = 'info') {
@@ -2571,10 +2772,12 @@ breakProgram() {
         this.programRunning = false;
         this.programPaused  = false;
         this.waitingForInput = false;
+        this.inputVariables = null;
         this._setStopBtn(false);
         this.enableImmediateMode();
         this._focusForInput();
     }
+    if (this.variablesWindowOpen) this._updateVariablesContent();
 }
 
 stopProgram() {
@@ -2601,6 +2804,7 @@ stopProgram() {
         this.programPaused = false;
         this.enableImmediateMode();
     }
+    if (this.variablesWindowOpen) this._updateVariablesContent();
 }
 
 stepProgram() {
@@ -2611,6 +2815,7 @@ stepProgram() {
     this.programPaused = true;
     this._setStopBtn(true, 'CONT');
     this.stepping = false;
+    if (this.variablesWindowOpen) this._updateVariablesContent();
 }
 
 listProgram() {
@@ -2626,6 +2831,8 @@ _clearVariablesBtn() {
         this.programPaused  = false;
         this._setStopBtn(false);
     }
+    this.waitingForInput = false;
+    this.inputVariables = null;
     this.scalarVariables = {};
     this.arrayVariables  = {};
     this.arrayDimensions = {};
@@ -2636,6 +2843,7 @@ _clearVariablesBtn() {
     this.dataValues  = [];
     this.lastKeyPressed = null;
     this.printToScreen('VARIABLES CLEARED');
+    if (this.variablesWindowOpen) this._updateVariablesContent();
 }
 
 _newBtn() {
