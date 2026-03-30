@@ -82,3 +82,6 @@ TRS80_Sep_7_2x
 # Test images
 *.jpg
 *.png
+# Open Graph preview for GitHub Pages (exceptions to *.png above)
+!docs/og-image.png
+!web_TRS_80/og-image.png
