@@ -16,7 +16,7 @@ The flagship demo is **SCOTTADV.BAS**, a ~580-line BASIC program that plays all 
 
 | Version | Location | How to run |
 |---------|----------|------------|
-| **Python (desktop)** | `TRS80_March_28_26.py` | `pip install -r requirements.txt && python TRS80_March_28_26.py` |
+| **Python (desktop)** | `TRS80_March_30_26.py` | `pip install -r requirements.txt && python TRS80_March_30_26.py` |
 | **JavaScript (browser)** | `web_TRS_80/index.html` | Open in any browser — no server needed |
 | **Live online demo** | `docs/index.html` | **[jmrothberg.github.io/TRS-80-Simulator](https://jmrothberg.github.io/TRS-80-Simulator/)** |
 
@@ -81,7 +81,7 @@ The crown jewel of this project: a complete Scott Adams adventure engine written
 3. Click **RUN** → press Enter when prompted → the adventure loads!
 
 **Python version:**
-1. Launch `python TRS80_March_28_26.py`
+1. Launch `python TRS80_March_30_26.py`
 2. Type `LOAD` on the green screen → select `SCOTTADV.BAS`
 3. Type `RUN` → press Enter → select the `.dat` file when the dialog appears
 
@@ -136,7 +136,7 @@ The interpreter reads the standard ScottFree ASCII `.dat` format. Additional `.d
 
 | File / Folder | Purpose |
 |---------------|---------|
-| `TRS80_March_28_26.py` | **Python simulator** — interpreter, Tkinter UI, screen, debugger (~3,900 lines) |
+| `TRS80_March_30_26.py` | **Python simulator** — interpreter, Tkinter UI, screen, debugger (~4,100 lines) |
 | `web_TRS_80/` | **JavaScript simulator** — same BASIC interpreter in the browser (`index.html`) |
 | `docs/` | Copy of `web_TRS_80/index.html` for **[GitHub Pages](https://jmrothberg.github.io/TRS-80-Simulator/)** |
 | `Scott_Adams_Basic_version/` | **SCOTTADV.BAS** adventure interpreter + 18 `.dat` game data files |
@@ -277,7 +277,7 @@ pyinstaller --onefile --console \
     --exclude-module tqdm --exclude-module sympy \
     --exclude-module PIL --exclude-module cv2 \
     --name TRS80 \
-    TRS80_March_28_26.py
+    TRS80_March_30_26.py
 ```
 
 **macOS Gatekeeper fix** — required after every build:
