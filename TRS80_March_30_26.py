@@ -22,6 +22,8 @@
 #                  full update() every 75 lines (was 25)
 #    Mar 31 2026 - Graphics batch 256 + time-budget GUI yields (aligned with
 #                  web_TRS_80 perf: fewer flushes, no line-stride idletasks cap)
+#    Mar 31 2026 - Tk canvas: tag_raise text layer after gfx flush so RESET
+#                  pixels do not cover glyphs (matches web two-layer behavior)
 #
 # ---------------------------------------------------------------------------
 #  HOW THE INTERPRETER WORKS  (read this before diving into the code)
@@ -120,6 +122,9 @@ INITIAL_WIDTH = 768  # 128 pixels * 6 = 774 to accommodate coordinates 1-128
 INITIAL_HEIGHT = 288  # Reduced from 288 to 192 for 7" screen
 
 class TRS80Simulator:
+    # Shared Tk tag for all text glyphs; tag_raise after graphics flush keeps text above p{x}_{y} rects (like web text layer).
+    CANVAS_TEXT_LAYER_TAG = 'txt'
+
     # ============================================================
     #  SECTION: Init & Configuration
     #  Build the Tkinter GUI (Canvas, input area, buttons), set up
@@ -1249,7 +1254,8 @@ class TRS80Simulator:
                     fill="black", outline="black")
                 if char != ' ':
                     screen.create_text(x, y, text=char,
-                        font=font, fill="lime", anchor="nw", tags=tag)
+                        font=font, fill="lime", anchor="nw",
+                        tags=(tag, self.CANVAS_TEXT_LAYER_TAG))
 
         self.update_cursor_display()
 
@@ -1276,7 +1282,8 @@ class TRS80Simulator:
                 if char != ' ':
                     tag = f"c{row}_{col}"
                     self.screen.create_text(col * char_w, row * char_h, text=char,
-                        font=font, fill="lime", anchor="nw", tags=tag)
+                        font=font, fill="lime", anchor="nw",
+                        tags=(tag, self.CANVAS_TEXT_LAYER_TAG))
 
     
     def handle_input_key(self, event):
@@ -1303,7 +1310,8 @@ class TRS80Simulator:
                 if old:
                     self.screen.itemconfigure(old[0], text=uc)
                 else:
-                    self.screen.create_text(x, y, text=uc, font=self._screen_font, fill="lime", anchor="nw", tags=tag)
+                    self.screen.create_text(x, y, text=uc, font=self._screen_font, fill="lime", anchor="nw",
+                        tags=(tag, self.CANVAS_TEXT_LAYER_TAG))
 
                 self.screen_content[self.cursor_row][self.cursor_col] = uc
                 self._input_buffer += char.upper()
@@ -3483,7 +3491,8 @@ class TRS80Simulator:
             # Update the screen display
             x = col * self._char_w
             y = row * self._char_h
-            self.screen.create_text(x, y, text=chr(value), font=self._screen_font, fill="lime", anchor="nw")
+            self.screen.create_text(x, y, text=chr(value), font=self._screen_font, fill="lime", anchor="nw",
+                tags=(f"c{row}_{col}", self.CANVAS_TEXT_LAYER_TAG))
             
             self.debug_print(f"POKE: Address={address}, Value={value}, Row={row}, Col={col}")
         else:
@@ -3577,6 +3586,9 @@ class TRS80Simulator:
                     self.screen.itemconfigure(cache[key], fill="black", outline="black")
 
         self._pending_graphics = []
+        # Keep text above p{x}_{y} items (RESET recolors gfx on top of glyphs in Tk draw order — mirrors web text layer).
+        self.screen.tag_raise(self.CANVAS_TEXT_LAYER_TAG)
+        self.screen.tag_raise('cursor')
 
     def get_pixel(self, x, y):
         if 0 <= x < 128 and 0 <= y < 48:
@@ -3818,7 +3830,8 @@ class TRS80Simulator:
             # Display character on screen
             x = self.cursor_col * self._char_w
             y = self.cursor_row * self._char_h
-            self.screen.create_text(x, y, text=char, font=self._screen_font, fill="lime", anchor="nw")
+            self.screen.create_text(x, y, text=char, font=self._screen_font, fill="lime", anchor="nw",
+                tags=(f"c{self.cursor_row}_{self.cursor_col}", self.CANVAS_TEXT_LAYER_TAG))
             self.screen_content[self.cursor_row][self.cursor_col] = char
             self.cursor_col += 1
             
