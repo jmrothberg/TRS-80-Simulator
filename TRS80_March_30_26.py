@@ -17,6 +17,9 @@
 #                  replacement, cached fonts/dimensions, canvas
 #                  itemconfigure, guarded debug prints)
 #    Mar 30 2026 - PRINT@ fixes, cursor handling improvements
+#    Mar 31 2026 - Graphics: itemconfigure cache (no delete+create per pixel),
+#                  INKEY update_idletasks every 4th line (was every line),
+#                  full update() every 75 lines (was 25)
 #
 # ---------------------------------------------------------------------------
 #  HOW THE INTERPRETER WORKS  (read this before diving into the code)
@@ -286,6 +289,8 @@ class TRS80Simulator:
         self.original_program = []
         self._pending_graphics = []
         self._active_pixels = set()
+        # Canvas item id per (x,y) for SET/RESET — itemconfigure instead of delete+create each flush
+        self._gfx_pixel_item_ids = {}
         
         # Initialize screen dimensions early for window positioning
         self.screen_width = 852
@@ -1127,6 +1132,7 @@ class TRS80Simulator:
         self._flush_graphics()
 
         self.screen.delete("all")
+        self._gfx_pixel_item_ids.clear()
         self.screen_content = [[' ' for _ in range(64)] for _ in range(16)]
         self.pixel_matrix = [[0 for _ in range(128)] for _ in range(48)]
         self._active_pixels = set()
@@ -1245,15 +1251,17 @@ class TRS80Simulator:
 
     def redraw_screen(self):
         self.screen.delete("all")
+        self._gfx_pixel_item_ids.clear()
         ps = self.pixel_size
         # Graphics first, text on top
         for x, y in self._active_pixels:
-            self.screen.create_rectangle(
+            kid = self.screen.create_rectangle(
                 x * ps, y * ps,
                 (x + 1) * ps, (y + 1) * ps,
                 fill="lime", outline="lime",
                 tags=f"p{x}_{y}"
             )
+            self._gfx_pixel_item_ids[(x, y)] = kid
         char_w = self._char_w
         char_h = self._char_h
         font = self._screen_font
@@ -1628,22 +1636,26 @@ class TRS80Simulator:
         or sets waiting_for_input (INPUT pauses the loop and returns to
         the Tkinter event loop; handle_input_return resumes via after()).
 
-        GUI responsiveness: update_idletasks every iteration when INKEY$
-        is in use, otherwise every 10th; full update() every 25th.
+        GUI responsiveness: update_idletasks every 4th iteration when INKEY$
+        is in use, otherwise every 10th; _flush_graphics every 25th;
+        full update() every 75th.
         """
         update_counter = 0  # Counter for batching GUI updates
         uses_inkey = getattr(self, '_uses_inkey', True)  # Optimization 7
 
         while self.program_running and not self.program_paused:
-            # Optimization 7: Only process events every iteration if INKEY$ is used
-            if uses_inkey or update_counter % 10 == 0:
-                self.master.update_idletasks()  # Process events without full redraw
+            # Optimization 7: process events periodically; every 4th line for INKEY games (was every line — Mar 31 2026)
+            if uses_inkey:
+                if update_counter % 4 == 0:
+                    self.master.update_idletasks()
+            elif update_counter % 10 == 0:
+                self.master.update_idletasks()
 
-            # Reduce full GUI updates for better performance - only every 25 iterations
+            # Flush graphics every 25 lines; full update() every 75 (~3x fewer expensive redraws — Mar 31 2026)
             if update_counter % 25 == 0:
-                self.master.update()  # Full GUI update including screen redraws
-                # Flush any pending graphics operations
                 self._flush_graphics()
+            if update_counter % 75 == 0:
+                self.master.update()
             update_counter += 1
 
             if self.current_line_index >= len(self._line_numbers) or not self._line_numbers:
@@ -3531,28 +3543,30 @@ class TRS80Simulator:
                 self._flush_graphics()
     
     def _flush_graphics(self):
-        """Process all pending graphics operations in one batch"""
+        """Process all pending graphics operations in one batch.
+        Uses itemconfigure on cached canvas item ids instead of delete+create (Mar 31 2026)."""
         if not self._pending_graphics:
             return
 
+        ps = self.pixel_size
+        cache = self._gfx_pixel_item_ids
         for operation, x, y in self._pending_graphics:
-            tag = f"p{x}_{y}"
-            self.screen.delete(tag)
+            key = (x, y)
             if operation == 'set':
-                self.screen.create_rectangle(
-                    x * self.pixel_size, y * self.pixel_size,
-                    (x + 1) * self.pixel_size, (y + 1) * self.pixel_size,
-                    fill="lime", outline="lime", tags=tag
-                )
-            else:  # reset
-                self.screen.create_rectangle(
-                    x * self.pixel_size, y * self.pixel_size,
-                    (x + 1) * self.pixel_size, (y + 1) * self.pixel_size,
-                    fill="black", outline="black", tags=tag
-                )
+                if key in cache:
+                    self.screen.itemconfigure(cache[key], fill="lime", outline="lime")
+                else:
+                    kid = self.screen.create_rectangle(
+                        x * ps, y * ps,
+                        (x + 1) * ps, (y + 1) * ps,
+                        fill="lime", outline="lime", tags=f"p{x}_{y}"
+                    )
+                    cache[key] = kid
+            else:  # reset — recolor to black; skip create if no cached item (canvas bg is black)
+                if key in cache:
+                    self.screen.itemconfigure(cache[key], fill="black", outline="black")
 
         self._pending_graphics = []
-        self.master.update_idletasks()
 
     def get_pixel(self, x, y):
         if 0 <= x < 128 and 0 <= y < 48:
