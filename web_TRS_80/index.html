@@ -76,7 +76,7 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 </head>
 <body>
 <div id="container">
-<h1>JMR's TRS-80 Simulator v1.4</h1>
+<h1>JMR's TRS-80 Simulator 1.5</h1>
 <div id="screenFrame">
 <canvas id="screen" width="768" height="288" tabindex="0"></canvas>
 <!-- Hidden input to trigger virtual keyboard on mobile/tablet -->
@@ -505,7 +505,7 @@ Graphics (128 x 48 pixel overlay):
   SET(x,y) ....... Turn on pixel
   RESET(x,y) ..... Turn off pixel
   POINT(x,y) ..... Read pixel (0 or 1)
-  x: 0–127, y: 0–47
+  x: 1–128, y: 1–48
 
 Screen Memory:
   PEEK(addr) ..... Read memory byte
