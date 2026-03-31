@@ -24,6 +24,8 @@ body { background: #2a2a2a; color: #ccc; font-family: Arial, sans-serif; display
 #container { max-width: 800px; width: 100%; }
 h1 { text-align: center; color: #7f7; font-size: 18px; margin-bottom: 8px; font-family: 'Courier New', monospace; }
 #screenFrame { background: #333; padding: 8px; border-radius: 6px; border: 2px solid #555; margin-bottom: 8px; display: flex; justify-content: center; }
+#screenStack { position: relative; display: inline-block; line-height: 0; }
+#screenText { position: absolute; left: 0; top: 0; pointer-events: none; }
 canvas { display: block; cursor: text; image-rendering: pixelated; }
 #inputArea { width: 100%; height: 110px; background: #1a1a1a; color: #0f0; border: 1px solid #555; font-family: 'Courier New', monospace; font-size: 13px; padding: 4px; resize: vertical; margin-bottom: 6px; }
 #buttonBar { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
@@ -78,7 +80,10 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 <div id="container">
 <h1>JMR's TRS-80 Simulator v1.7</h1>
 <div id="screenFrame">
-<canvas id="screen" width="768" height="288" tabindex="0"></canvas>
+<div id="screenStack">
+<canvas id="screenGfx" width="768" height="288" tabindex="0"></canvas>
+<canvas id="screenText" width="768" height="288"></canvas>
+</div>
 <!-- Hidden input to trigger virtual keyboard on mobile/tablet -->
 <input id="mobileKeyInput" type="text" autocomplete="off" autocorrect="off" autocapitalize="characters" spellcheck="false"
   style="position:absolute;left:-9999px;top:0;width:1px;height:1px;opacity:0;pointer-events:none;">
@@ -150,14 +155,11 @@ const SCREEN_H = 288;   // 48  * 6
 const COLS = 64;
 const ROWS = 16;
 
-// JS run loop: yield to the browser for INKEY$/keyboard. Align INKEY stride with Python (every 4th line, Mar 31 2026).
-const INKEY_YIELD_LINE_STRIDE = 4;
-const INKEY_YIELD_MS_BUDGET   = 16;      // cap latency if a BASIC line is very heavy (~1 frame)
-const NO_INKEY_YIELD_LINE_STRIDE = 50;
-const NO_INKEY_YIELD_MS_BUDGET   = 50;
-const GRAPHICS_FLUSH_LINE_INTERVAL = 25;
-// SET/RESET batch before flush — larger batch = fewer full canvas composits (games)
-const GRAPHICS_PENDING_BATCH = 40;
+// JS run loop: yield via setTimeout(0) — time budget only (no line-stride cap; Mar 2026 perf plan).
+const INKEY_YIELD_MS_BUDGET   = 16;
+const NO_INKEY_YIELD_MS_BUDGET = 50;
+// SET/RESET batch before gfx blit — one scaled drawImage per batch (games)
+const GRAPHICS_PENDING_BATCH = 256;
 
 const KEYWORD_REPLACEMENTS = {
     'MOD': ' % ',
@@ -178,8 +180,12 @@ class TRS80Simulator {
 //  Constructor — mirrors Python __init__
 // ------------------------------------------------------------------
 constructor() {
-    this.canvas = document.getElementById('screen');
-    this.ctx    = this.canvas.getContext('2d');
+    // Stacked canvases: bottom = 128×48 bitmap scaled; top = text/cursor (transparent where no text).
+    this.canvasGfx  = document.getElementById('screenGfx');
+    this.canvasText = document.getElementById('screenText');
+    this.canvas = this.canvasGfx; // focus + keyboard target (Mar 2026 perf: two-layer display)
+    this.ctxGfx  = this.canvasGfx.getContext('2d');
+    this.ctxText = this.canvasText.getContext('2d');
     this.inputArea  = document.getElementById('inputArea');
     this.debugText  = document.getElementById('debugText');
     this.debugPanel = document.getElementById('debugPanel');
@@ -239,14 +245,19 @@ constructor() {
     this._arrayPatterns   = {};
     this._varRegexCache   = {};
 
-    this._pendingGraphics = [];
-    // 128×48 logical graphics plane → one putImageData + drawImage per flush (faster than many fillRects)
+    // Gfx dirty flag + batch counter — quick flush = one blit to ctxGfx (no per-pixel fillRect).
+    this._gfxDirty = false;
+    this._gfxBatchCount = 0;
+    // 128×48 logical graphics plane → putImageData + drawImage to screenGfx (Mar 2026 perf plan)
     this._gfxOffscreen = document.createElement('canvas');
     this._gfxOffscreen.width = 128;
     this._gfxOffscreen.height = 48;
     this._gfxCtx = this._gfxOffscreen.getContext('2d');
     this._gfxImageData = this._gfxCtx.createImageData(128, 48);
-    this.ctx.imageSmoothingEnabled = false;
+    // Single 32-bit writes per pixel (RGBA little-endian: green 0xFF33FF33, black 0xFF000000)
+    this._gfxPixelsU32 = new Uint32Array(this._gfxImageData.data.buffer);
+    this.ctxGfx.imageSmoothingEnabled = false;
+    this.ctxText.imageSmoothingEnabled = false;
 
     this._lastDebugCommand    = '';
     this._lastEvalOriginal    = '';
@@ -592,63 +603,53 @@ AVAILABLE GAMES (ScottFree .dat format):
 //  Screen Rendering
 // ------------------------------------------------------------------
 clearScreen() {
-    this._flushGraphics();
-    const ctx = this.ctx;
-    ctx.fillStyle = 'black';
-    ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
+    this._gfxDirty = false;
+    this._gfxBatchCount = 0;
     this.screenContent = Array.from({length: ROWS}, () => Array(COLS).fill(' '));
     this.pixelMatrix   = Array.from({length: 48}, () => Array(128).fill(0));
     this.activePixels  = new Set();
     this.cursorRow = 0;
     this.cursorCol = 0;
-    this._pendingGraphics = [];
     this._syncGfxBufferFromPixelMatrixFull();
+    this._blitGraphicsBitmapToMain();
+    this.ctxText.clearRect(0, 0, SCREEN_W, SCREEN_H);
     this.updateCursorDisplay();
 }
 
-// Yield so the browser can process key events (INKEY$ / PEEK(14400)). Uses rAF for predictable ~60 Hz cadence.
+// Yield so the browser can process key events (INKEY$ / PEEK(14400)). setTimeout(0) — not rAF (~16ms); Mar 2026 perf plan.
 _yieldToBrowser() {
-    return new Promise((resolve) => requestAnimationFrame(() => resolve()));
+    return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-// Update one logical pixel in the 128×48 ImageData buffer (kept in sync with pixelMatrix on SET/RESET — Mar 31 2026).
+// Update one logical pixel in the 128×48 buffer (Uint32 RGBA — Mar 2026 perf plan).
 _writeGfxPixelInBuffer(x, y, on) {
-    const i = (y * 128 + x) * 4;
-    const d = this._gfxImageData.data;
-    if (on) {
-        d[i] = 51; d[i + 1] = 255; d[i + 2] = 51; d[i + 3] = 255;
-    } else {
-        d[i] = 0; d[i + 1] = 0; d[i + 2] = 0; d[i + 3] = 255;
-    }
+    const idx = y * 128 + x;
+    this._gfxPixelsU32[idx] = on ? 0xFF33FF33 : 0xFF000000;
 }
 
 // Full rebuild from pixelMatrix — after CLS, scroll/redraw, or any path that mutates matrix without setPixel/resetPixel.
 _syncGfxBufferFromPixelMatrixFull() {
-    const data = this._gfxImageData.data;
+    const u32 = this._gfxPixelsU32;
     const mtx = this.pixelMatrix;
-    let p = 0;
     for (let y = 0; y < 48; y++) {
         const row = mtx[y];
+        const base = y * 128;
         for (let x = 0; x < 128; x++) {
-            if (row[x]) {
-                data[p] = 51; data[p + 1] = 255; data[p + 2] = 51; data[p + 3] = 255;
-            } else {
-                data[p] = 0; data[p + 1] = 0; data[p + 2] = 0; data[p + 3] = 255;
-            }
-            p += 4;
+            u32[base + x] = row[x] ? 0xFF33FF33 : 0xFF000000;
         }
     }
 }
 
-// Push buffered bitmap to main canvas (no 6144-pixel loop — buffer updated incrementally on SET/RESET).
+// Push 128×48 bitmap to the bottom (graphics-only) canvas.
 _blitGraphicsBitmapToMain() {
     this._gfxCtx.putImageData(this._gfxImageData, 0, 0);
-    this.ctx.drawImage(this._gfxOffscreen, 0, 0, SCREEN_W, SCREEN_H);
+    this.ctxGfx.drawImage(this._gfxOffscreen, 0, 0, SCREEN_W, SCREEN_H);
 }
 
-// Text layer only (graphics already drawn). Used after full graphics blit.
+// Text overlay: clear transparent, then non-space chars (spaces show graphics from layer below).
 _drawTextLayerFromScreenContent() {
-    const ctx = this.ctx;
+    const ctx = this.ctxText;
+    ctx.clearRect(0, 0, SCREEN_W, SCREEN_H);
     ctx.font = this.screenFont;
     ctx.textBaseline = 'top';
     for (let r = 0; r < ROWS; r++) {
@@ -665,19 +666,20 @@ _drawTextLayerFromScreenContent() {
 drawChar(row, col, char) {
     const x = col * this.charW;
     const y = row * this.charH;
-    this.ctx.fillStyle = 'black';
-    this.ctx.fillRect(x, y, this.charW, this.charH);
+    const ctx = this.ctxText;
+    ctx.fillStyle = 'black';
+    ctx.fillRect(x, y, this.charW, this.charH);
     if (char && char !== ' ') {
-        this.ctx.fillStyle = '#33ff33';
-        this.ctx.font = this.screenFont;
-        this.ctx.textBaseline = 'top';
-        this.ctx.fillText(char, x + 1, y + 1);
+        ctx.fillStyle = '#33ff33';
+        ctx.font = this.screenFont;
+        ctx.textBaseline = 'top';
+        ctx.fillText(char, x + 1, y + 1);
     }
 }
 
 printToScreen(text, end = '\n') {
     const output = String(text) + end;
-    const ctx = this.ctx;
+    const ctx = this.ctxText;
 
     for (const char of output) {
         if (char === '\n' || this.cursorCol >= COLS) {
@@ -706,9 +708,6 @@ printToScreen(text, end = '\n') {
 }
 
 redrawScreen() {
-    const ctx = this.ctx;
-    ctx.fillStyle = 'black';
-    ctx.fillRect(0, 0, SCREEN_W, SCREEN_H);
     this._syncGfxBufferFromPixelMatrixFull();
     this._blitGraphicsBitmapToMain();
     this._drawTextLayerFromScreenContent();
@@ -760,8 +759,8 @@ updateCursorDisplay() {
     if (this.cursorVisible || this.waitingForInput) {
         const x = this.cursorCol * this.charW;
         const y = this.cursorRow * this.charH;
-        this.ctx.fillStyle = '#33ff33';
-        this.ctx.fillRect(x, y, this.charW, this.charH);
+        this.ctxText.fillStyle = '#33ff33';
+        this.ctxText.fillRect(x, y, this.charW, this.charH);
     }
     this._lastCursorRow = this.cursorRow;
     this._lastCursorCol = this.cursorCol;
@@ -1211,22 +1210,17 @@ async executeNextLine() {
 
         updateCounter++;
         if (updateCounter % 100 === 0 && this.variablesWindowOpen) this._updateVariablesContent();
-        // Yield: line stride + time budget so INKEY games stay responsive without await every line (plan Mar 2026)
         const now = performance.now();
         const elapsed = now - lastYieldMs;
-        let shouldYield = false;
-        if (this._usesInkey) {
-            if (updateCounter % INKEY_YIELD_LINE_STRIDE === 0 || elapsed >= INKEY_YIELD_MS_BUDGET) shouldYield = true;
-        } else {
-            if (updateCounter % NO_INKEY_YIELD_LINE_STRIDE === 0 || elapsed >= NO_INKEY_YIELD_MS_BUDGET) shouldYield = true;
-        }
+        // Time-budget yield only (setTimeout(0); no line-stride cap — Mar 2026 perf plan).
+        const shouldYield = this._usesInkey
+            ? elapsed >= INKEY_YIELD_MS_BUDGET
+            : elapsed >= NO_INKEY_YIELD_MS_BUDGET;
         if (shouldYield) {
             this._flushGraphicsQuick();
             await this._yieldToBrowser();
             lastYieldMs = performance.now();
         }
-        // Periodic flush: quick per-pixel only (no text redraw). Full composite on yield/INPUT/END.
-        if (updateCounter % GRAPHICS_FLUSH_LINE_INTERVAL === 0) this._flushGraphicsQuick();
 
         if (this.stepping) {
             this._flushGraphics();
@@ -1262,7 +1256,8 @@ newProgram() {
     this._varRegexCache   = {};
     this._resetScreenArrays();
     this.clearScreen();
-    this._pendingGraphics = [];
+    this._gfxDirty = false;
+    this._gfxBatchCount = 0;
     this.tapePointer = 0;
     this._lastDebugCommand = '';
     this._lastEvalOriginal = '';
@@ -2549,9 +2544,10 @@ setPixel(x, y) {
     if (x >= 0 && x < 128 && y >= 0 && y < 48) {
         this.pixelMatrix[y][x] = 1;
         this._writeGfxPixelInBuffer(x, y, true);
-        this._pendingGraphics.push(['set', x, y]);
         this.activePixels.add(y * 128 + x);
-        if (this._pendingGraphics.length >= GRAPHICS_PENDING_BATCH) this._flushGraphicsQuick();
+        this._gfxDirty = true;
+        this._gfxBatchCount++;
+        if (this._gfxBatchCount >= GRAPHICS_PENDING_BATCH) this._flushGraphicsQuick();
     }
 }
 
@@ -2559,29 +2555,25 @@ resetPixel(x, y) {
     if (x >= 0 && x < 128 && y >= 0 && y < 48) {
         this.pixelMatrix[y][x] = 0;
         this._writeGfxPixelInBuffer(x, y, false);
-        this._pendingGraphics.push(['reset', x, y]);
         this.activePixels.delete(y * 128 + x);
-        if (this._pendingGraphics.length >= GRAPHICS_PENDING_BATCH) this._flushGraphicsQuick();
+        this._gfxDirty = true;
+        this._gfxBatchCount++;
+        if (this._gfxBatchCount >= GRAPHICS_PENDING_BATCH) this._flushGraphicsQuick();
     }
 }
 
-// Lightweight per-pixel flush — individual fillRect per pending op (like Python's itemconfigure).
-// Does NOT redraw the text layer, so it avoids the 1024-cell scan on every batch.
+// Quick flush — one scaled bitmap blit to screenGfx only (text layer unchanged; Mar 2026 perf plan).
 _flushGraphicsQuick() {
-    if (!this._pendingGraphics.length) return;
-    const ctx = this.ctx;
-    const ps = this.pixelSize;
-    for (const [op, x, y] of this._pendingGraphics) {
-        ctx.fillStyle = op === 'set' ? '#33ff33' : 'black';
-        ctx.fillRect(x * ps, y * ps, ps, ps);
-    }
-    this._pendingGraphics = [];
+    if (!this._gfxDirty) return;
+    this._gfxDirty = false;
+    this._gfxBatchCount = 0;
+    this._blitGraphicsBitmapToMain();
 }
 
-// Full composite flush — blit entire graphics plane + redraw text layer.
-// Called from run loop every GRAPHICS_FLUSH_LINE_INTERVAL lines and on INPUT/END/STEP.
+// Full composite — graphics blit + text overlay + cursor (INPUT/END/STEP/clear paths).
 _flushGraphics() {
-    this._pendingGraphics = [];
+    this._gfxDirty = false;
+    this._gfxBatchCount = 0;
     this._blitGraphicsBitmapToMain();
     this._drawTextLayerFromScreenContent();
     this.updateCursorDisplay();

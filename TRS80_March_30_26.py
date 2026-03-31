@@ -20,6 +20,8 @@
 #    Mar 31 2026 - Graphics: itemconfigure cache (no delete+create per pixel),
 #                  INKEY update_idletasks every 4th line (was every line),
 #                  full update() every 75 lines (was 25)
+#    Mar 31 2026 - Graphics batch 256 + time-budget GUI yields (aligned with
+#                  web_TRS_80 perf: fewer flushes, no line-stride idletasks cap)
 #
 # ---------------------------------------------------------------------------
 #  HOW THE INTERPRETER WORKS  (read this before diving into the code)
@@ -50,8 +52,8 @@
 #     Each iteration calls execute_command(), which returns:
 #       None   → advance to next line
 #       int/float → GOTO that line number (binary-searched via find_line_index)
-#     The loop yields to the Tkinter event loop every N iterations so the
-#     GUI stays responsive and INKEY$/PEEK(14400) can poll keystrokes.
+#     The loop yields to the Tkinter event loop on a time budget (ms, not
+#     line count) so the GUI stays responsive and INKEY$/PEEK(14400) can poll.
 #
 #  4. COMMAND DISPATCH  (execute_command → _command_handlers dict)
 #     The pre-extracted keyword is looked up in self._command_handlers, a
@@ -107,6 +109,9 @@ import os
 import math
 import time
 import platform
+
+# SET/RESET ops before _flush_graphics (matches web_TRS_80 GRAPHICS_PENDING_BATCH — Mar 2026)
+_GRAPHICS_PENDING_BATCH = 256
 # TRS80LLMSupport is imported lazily in open_llm_support() to avoid
 # pulling in torch/transformers at startup (faster launch, smaller binary).
 TRS80LLMSupport = None
@@ -1636,26 +1641,33 @@ class TRS80Simulator:
         or sets waiting_for_input (INPUT pauses the loop and returns to
         the Tkinter event loop; handle_input_return resumes via after()).
 
-        GUI responsiveness: update_idletasks every 4th iteration when INKEY$
-        is in use, otherwise every 10th; _flush_graphics every 25th;
-        full update() every 75th.
+        GUI responsiveness: time-budget yields (mirrors web_TRS_80 Mar 2026) —
+        update_idletasks ~16ms when INKEY$, ~50ms otherwise; full update() ~100ms;
+        _flush_graphics every 25th line (pending ops only; no-op if empty).
         """
-        update_counter = 0  # Counter for batching GUI updates
+        update_counter = 0  # Counter for debug / variables window cadence
         uses_inkey = getattr(self, '_uses_inkey', True)  # Optimization 7
+        last_idle_t = time.perf_counter()
+        last_full_t = time.perf_counter()
 
         while self.program_running and not self.program_paused:
-            # Optimization 7: process events periodically; every 4th line for INKEY games (was every line — Mar 31 2026)
+            # Time-budget event processing — avoids capping throughput at ~N lines/s (line-stride idletasks)
+            now = time.perf_counter()
             if uses_inkey:
-                if update_counter % 4 == 0:
+                if now - last_idle_t >= 0.016:
                     self.master.update_idletasks()
-            elif update_counter % 10 == 0:
-                self.master.update_idletasks()
+                    last_idle_t = now
+            else:
+                if now - last_idle_t >= 0.050:
+                    self.master.update_idletasks()
+                    last_idle_t = now
+            if now - last_full_t >= 0.10:
+                self.master.update()
+                last_full_t = now
 
-            # Flush graphics every 25 lines; full update() every 75 (~3x fewer expensive redraws — Mar 31 2026)
+            # Flush any pending SET/RESET periodically between lines (batch size handles heavy lines)
             if update_counter % 25 == 0:
                 self._flush_graphics()
-            if update_counter % 75 == 0:
-                self.master.update()
             update_counter += 1
 
             if self.current_line_index >= len(self._line_numbers) or not self._line_numbers:
@@ -1703,11 +1715,9 @@ class TRS80Simulator:
                 else:
                     self.current_line_index += 1
 
-            # Only update GUI and variables window occasionally - reduced frequency
-            if update_counter % 100 == 0:
-                self.master.update_idletasks()  # Allow GUI to update
-                if self.variables_window_open:
-                    self.update_variables_window()
+            # Variables window refresh (idletasks handled by time budget at loop top)
+            if update_counter % 100 == 0 and self.variables_window_open:
+                self.update_variables_window()
                 
 
                     
@@ -3518,7 +3528,7 @@ class TRS80Simulator:
     #  SECTION: Graphics (SET/RESET/POINT)
     #  The 128x48 pixel grid is stored in self.pixel_matrix.
     #  SET/RESET queue operations in _pending_graphics (batched
-    #  every 20 ops or at GUI-update boundaries).  _flush_graphics
+    #  every _GRAPHICS_PENDING_BATCH ops or at GUI-update boundaries).  _flush_graphics
     #  draws/erases pixel rectangles on the Canvas.  self._active_pixels
     #  tracks which (x,y) are lit for efficient redraw/scroll.
     # ============================================================
@@ -3529,7 +3539,7 @@ class TRS80Simulator:
             self._active_pixels.add((x, y))
             
             # Process graphics in batches to improve speed
-            if len(self._pending_graphics) >= 20:
+            if len(self._pending_graphics) >= _GRAPHICS_PENDING_BATCH:
                 self._flush_graphics()
 
     def reset_pixel(self, x, y):
@@ -3539,7 +3549,7 @@ class TRS80Simulator:
             self._active_pixels.discard((x, y))
             
             # Process graphics in batches to improve speed
-            if len(self._pending_graphics) >= 20:
+            if len(self._pending_graphics) >= _GRAPHICS_PENDING_BATCH:
                 self._flush_graphics()
     
     def _flush_graphics(self):
