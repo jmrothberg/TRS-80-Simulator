@@ -176,7 +176,7 @@ The simulator targets TRS-80 Model I Level II BASIC:
 
 - Every program line needs a line number. Keywords must be uppercase.
 - `PRINT@` uses screen positions (0-1023).
-- `RND(n)` returns an integer from 1 to n. `RND(0)` returns a float 0-1.
+- `RND`, `RND(0)`, `RND(1)` all return a new random float 0.0–0.9999 (for probability checks). `RND(n)` where n>1 returns a random integer 1–n (for coordinates/dice).
 - Comparisons return `-1` (true) or `0` (false).
 - `AND`, `OR`, `NOT` work as logical operators on -1/0 values.
 - `STR$(n)` includes a leading space for the sign placeholder.

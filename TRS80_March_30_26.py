@@ -1073,8 +1073,8 @@ class TRS80Simulator:
     #  The TRS-80 display is a Tkinter Canvas (green on black).
     #  Text characters are Canvas text items tagged "c{row}_{col}";
     #  graphics pixels are rectangles tagged "p{x}_{y}".
-    #  print_to_screen writes characters and uses itemconfigure to
-    #  update existing items (avoids delete+create overhead).
+    #  print_to_screen redraws the 2x3 graphics dots per cell from
+    #  pixel_matrix, then draws text (full-cell black used to erase SET).
     #  _scroll_screen_up shifts screen_content and pixel_matrix up
     #  by one text row (3 pixel rows), then redraws.
     #  redraw_screen does a full repaint from the data arrays.
@@ -1208,7 +1208,7 @@ class TRS80Simulator:
 
     def print_to_screen(self, *args, end='\n'):
         text = ' '.join(str(arg) for arg in args) + end
-        chars_to_draw = []  # Batch characters for drawing
+        chars_to_draw = []
         char_w = self._char_w
         char_h = self._char_h
 
@@ -1220,40 +1220,33 @@ class TRS80Simulator:
                     self._scroll_screen_up()
                     chars_to_draw = []
                 if char == '\n':
-                    continue  # Newline is a control code — no character drawn
-                # Column overflow: char is printable, draw it on the new row
+                    continue
             self.screen_content[self.cursor_row][self.cursor_col] = char
             row, col = self.cursor_row, self.cursor_col
             chars_to_draw.append((col * char_w, row * char_h, char, row, col))
             self.cursor_col += 1
 
-        # Draw all characters — clear each cell first (one char per cell, no overlap)
         screen = self.screen
         font = self._screen_font
         for x, y, char, row, col in chars_to_draw:
             tag = f"c{row}_{col}"
-            # Clear the cell: delete any previous canvas items at this position
             items = screen.find_withtag(tag)
             if items:
-                screen.delete(items[0])
-            # Black-fill the cell area to erase any orphan rectangles/debris
-            screen.create_rectangle(
-                x, y, x + char_w, y + char_h,
-                fill="black", outline="black", tags=("_cellbg",))
-            # Draw the character (if not a space)
-            if char != ' ':
-                screen.create_text(x, y, text=char,
-                    font=font, fill="lime", anchor="nw", tags=tag)
+                screen.itemconfigure(items[0], text=char)
+            else:
+                screen.create_rectangle(x, y, x + char_w, y + char_h,
+                    fill="black", outline="black")
+                if char != ' ':
+                    screen.create_text(x, y, text=char,
+                        font=font, fill="lime", anchor="nw", tags=tag)
 
-        # Update cursor display after printing
         self.update_cursor_display()
 
 
     def redraw_screen(self):
         self.screen.delete("all")
         ps = self.pixel_size
-
-        # Redraw only active pixels (performance: skip empty positions)
+        # Graphics first, text on top
         for x, y in self._active_pixels:
             self.screen.create_rectangle(
                 x * ps, y * ps,
@@ -1261,8 +1254,6 @@ class TRS80Simulator:
                 fill="lime", outline="lime",
                 tags=f"p{x}_{y}"
             )
-
-        # Redraw text characters with tags for bounded canvas items
         char_w = self._char_w
         char_h = self._char_h
         font = self._screen_font
@@ -1297,10 +1288,9 @@ class TRS80Simulator:
                 tag = f"c{self.cursor_row}_{self.cursor_col}"
                 old = self.screen.find_withtag(tag)
                 if old:
-                    self.screen.delete(old[0])
-                self.screen.create_rectangle(x, y, x + self._char_w, y + self._char_h,
-                    fill="black", outline="black", tags=("_cellbg",))
-                self.screen.create_text(x, y, text=uc, font=self._screen_font, fill="lime", anchor="nw", tags=tag)
+                    self.screen.itemconfigure(old[0], text=uc)
+                else:
+                    self.screen.create_text(x, y, text=uc, font=self._screen_font, fill="lime", anchor="nw", tags=tag)
 
                 self.screen_content[self.cursor_row][self.cursor_col] = uc
                 self._input_buffer += char.upper()
@@ -1330,10 +1320,10 @@ class TRS80Simulator:
                     self.cursor_row -= 1
                     self.cursor_col = 63
 
-                # Clear the character on the canvas
                 x = self.cursor_col * self._char_w
                 y = self.cursor_row * self._char_h
-                self.screen.create_rectangle(x, y, x + self._char_w, y + self._char_h, fill="black", outline="black")
+                self.screen.create_rectangle(x, y, x + self._char_w, y + self._char_h,
+                    fill="black", outline="black")
 
                 # Update the screen content and input buffer
                 self.screen_content[self.cursor_row][self.cursor_col] = ' '
@@ -3337,12 +3327,18 @@ class TRS80Simulator:
         }
 
     def _func_rnd(self, inner_value, inner_expr):
-        """RND(n): TRS-80 Level II returns random float in [0,1) for n>0, last value for n=0"""
+        """RND(n): TRS-80 / Atari-ported BASIC convention used in this project.
+        RND(0)  -> new random float 0.0..0.9999 (Midway uses RND(0) as primary RNG)
+        RND(1)  -> new random float 0.0..0.9999 (STARTREK probabilities)
+        RND(n>1)-> new random INTEGER 1..n       (Snake coordinates)
+        """
         n = float(inner_value)
-        if n == 0:
-            return getattr(self, '_last_rnd', random.random())
-        self._last_rnd = random.random()
-        return self._last_rnd
+        if int(n) <= 1:
+            result = random.random()
+        else:
+            result = random.randint(1, int(n))
+        self._last_rnd = result
+        return result
 
     def _func_str(self, inner_value, inner_expr):
         """STR$(n): TRS-80 adds leading space for non-negative numbers"""

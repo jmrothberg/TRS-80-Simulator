@@ -291,9 +291,14 @@ LOG(x)          ' Natural logarithm
 
 ### Random Numbers
 ```basic
-RND             ' Random 0.0 to 0.999999
-RND(n)          ' Random integer 0 to n-1
+RND             ' Random float 0.0 to 0.999999
+RND(0)          ' New random float 0.0 to 0.999999 (same as RND)
+RND(1)          ' New random float 0.0 to 0.999999 (used for probabilities)
+RND(n)          ' n > 1: random INTEGER 1 to n    (used for coordinates/dice)
 ```
+Note: `RND(0)` and `RND(1)` both generate a new float — used throughout games
+like Midway Campaign and STARTREK for probability checks (e.g. `IF RND(0)>0.5`).
+`RND(n)` with n>1 returns an integer for things like random grid positions.
 
 ## String Functions
 
