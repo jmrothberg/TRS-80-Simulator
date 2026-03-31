@@ -160,9 +160,13 @@ The `Basic_Code_Examples/` directory contains:
 | `breakout_II.bas` | Breakout clone |
 | `Hi_Low.bas` | Number guessing game |
 | `hangman.bas` | Hangman word game |
+| `Midway_Campaign_TRS80.bas` | *Midway Campaign* (Battle of Midway): `PRINT@` map, T/A/L/CA/CL, help; listed in the web **Examples** menu (GitHub raw) |
+| `Midway_Campaign_Atari8_LISTING.txt` | ASCII listing of *Midway Campaign* detokenized from **Atari BASIC** (see note below — not for this TRS-80 simulator) |
 | `complex_test_suite.bas` | Comprehensive BASIC feature tests |
 
 Run with: click **LOAD** (or type `LOAD` on the green screen), select a `.bas` file, then click **RUN**.
+
+**Atari 8-bit tokenized `.bas` files:** A file saved from Atari BASIC is usually **binary** (tokenized), not plain text — editors show garbage. To convert it to a readable listing, use a detokenizer such as [atariconv](https://github.com/mistalro/atariconv) (`make` in `src` produces the `atari` tool; run it on the tokenized file). The program uses Atari-specific statements (`GRAPHICS`, `POSITION`, `POKE` to Atari locations, etc.) and will **not** run in this TRS-80 simulator without a manual port.
 
 ---
 

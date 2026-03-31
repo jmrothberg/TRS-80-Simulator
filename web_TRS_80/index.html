@@ -310,7 +310,8 @@ _compileRegexPatterns() {
     this._re.dim          = /^DIM\s+(\w+\$?)\((.+)\)$/;
     this._re.poke         = /^POKE\s+(.+?)\s*,\s*(.+)/;
     this._re.tab          = /TAB\((\d+)\)/;
-    this._re.funcMatch    = /(INT|SIN|COS|TAN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(/;
+    // ATN must be listed: otherwise ATN(x) is not reduced in _evalNested and can fall through as a string (mirrors TRS80_March_30_26.py func_match).
+    this._re.funcMatch    = /(INT|SIN|COS|TAN|ATN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(/;
     this._re.stringSplit  = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/;
     this._re.inkey        = /\bINKEY\$/;
     this._re.allKeywords  = /\bRND\b(?!\()|\bMOD\b|\bOR\b|\bAND\b|\bNOT\b|<>|(?<![=<>])=(?!=)|\^/g;
@@ -434,7 +435,7 @@ Immediate Mode (type on green screen):
 
 Program Statements:
   PRINT expr [;|,] expr ...
-  PRINT@ pos, expr    (screen position 0-1023)
+  PRINT@ pos, expr    (position 1–1024, TRS-80 upper-left=1; engine uses pos-1)
   PRINT TAB(n); expr
   LET var = expr      (LET is optional)
   INPUT ["prompt";] var [, var2 ...]
@@ -469,6 +470,7 @@ Math Functions:
   SGN(x) ......... Sign (-1, 0, or 1)
   SQR(x) ......... Square root
   SIN(x), COS(x), TAN(x)  (radians)
+  ATN(x) ......... Arctangent (radians); Level II
   EXP(x) ......... e^x
   LOG(x) ......... Natural log
   RND ............ Random 0.0–0.999
@@ -513,7 +515,7 @@ Screen Memory:
 Text Screen:
   64 columns x 16 rows
   Each text cell = 2x3 graphics pixels
-  PRINT@ position (0–1023)
+  PRINT@ position (1–1024, same as TRS-80 Level II; upper-left = 1)
 
 Variables:
   A–Z, A0–Z9      (numeric)
@@ -824,9 +826,13 @@ _handleInputReturn() {
         this._assignInputValue(this.inputVariables[i], parts[i] != null ? parts[i] : '');
     }
 
-    this.cursorRow++;
+    // Do not scroll on INPUT completion — same as TRS80_March_30_26.py (full-screen HELP/CLS).
     this.cursorCol = 0;
-    if (this.cursorRow >= ROWS) this._scrollScreenUp();
+    if (this.cursorRow < ROWS - 1) {
+        this.cursorRow++;
+    } else {
+        this.cursorRow = ROWS - 1;
+    }
 
     this.waitingForInput = false;
     this.inputVariables = null;
@@ -1282,8 +1288,6 @@ _formatNumber(value) {
 // ------------------------------------------------------------------
 _cmdPrint(command) {
     const isPrintAt = command.startsWith('PRINT@');
-    const savedRow = this.cursorRow;
-    const savedCol = this.cursorCol;
 
     let content;
     if (isPrintAt) {
@@ -1291,6 +1295,7 @@ _cmdPrint(command) {
         if (match) {
             const posExpr = match[1];
             content = match[2] || '';
+            // TRS-80 Level II: PRINT@ uses 1..1024; subtract 1 for 0-based row/col (mirrors _cmd_print in TRS80_March_30_26.py).
             let position = Math.trunc(this.evaluateExpression(posExpr)) - 1;
             this.cursorRow = Math.trunc(position / COLS);
             this.cursorCol = position % COLS;
@@ -1352,10 +1357,7 @@ _cmdPrint(command) {
         this.printToScreen(output, '\n');
     }
 
-    if (isPrintAt) {
-        this.cursorRow = savedRow;
-        this.cursorCol = savedCol;
-    }
+    // Do not restore cursor after PRINT@ — INPUT ? follows last PRINT (mirrors TRS80_March_30_26.py).
 }
 
 _findNextSeparator(s, start) {
@@ -1896,6 +1898,7 @@ _populateGitHubDropdowns() {
         'Basic_Code_Examples/Invaders_VI.bas',
         'Basic_Code_Examples/Invaders_full.bas',
         'Basic_Code_Examples/STARTREK.bas',
+        'Basic_Code_Examples/Midway_Campaign_TRS80.bas',
         'Scott_Adams_Basic_version/SCOTTADV.BAS',
     ];
     for (const path of basFiles) {
@@ -2336,6 +2339,7 @@ _initBuiltinFunctions() {
         'SIN':     (v) => Math.sin(Number(v)),
         'COS':     (v) => Math.cos(Number(v)),
         'TAN':     (v) => Math.tan(Number(v)),
+        'ATN':     (v) => Math.atan(Number(v)),
         'SQR':     (v) => Math.sqrt(Number(v)),
         'LOG':     (v) => Math.log(Number(v)),
         'EXP':     (v) => Math.exp(Number(v)),
