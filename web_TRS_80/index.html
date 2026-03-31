@@ -76,7 +76,7 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 </head>
 <body>
 <div id="container">
-<h1>JMR's TRS-80 Simulator 1.5</h1>
+<h1>JMR's TRS-80 Simulator v1.5</h1>
 <div id="screenFrame">
 <canvas id="screen" width="768" height="288" tabindex="0"></canvas>
 <!-- Hidden input to trigger virtual keyboard on mobile/tablet -->
@@ -685,7 +685,10 @@ _blinkCursor() {
 }
 
 _eraseCursor() {
-    if (this._lastCursorRow !== undefined) {
+    if (this._lastCursorRow !== undefined &&
+        this._lastCursorRow >= 0 && this._lastCursorRow < ROWS &&
+        this._lastCursorCol >= 0 && this._lastCursorCol < COLS &&
+        this.screenContent[this._lastCursorRow]) {
         this.drawChar(this._lastCursorRow, this._lastCursorCol,
                       this.screenContent[this._lastCursorRow][this._lastCursorCol]);
     }
@@ -1336,17 +1339,8 @@ _cmdPrint(command) {
         }
     }
 
-    if (isPrintAt && output) {
-        const clearLen = Math.min(output.length, COLS - this.cursorCol);
-        if (clearLen > 0) {
-            this.ctx.fillStyle = 'black';
-            this.ctx.fillRect(this.cursorCol * this.charW, this.cursorRow * this.charH,
-                              clearLen * this.charW, this.charH);
-            for (let i = 0; i < clearLen; i++) {
-                this.screenContent[this.cursorRow][this.cursorCol + i] = ' ';
-            }
-        }
-    }
+    // PRINT@ is "set cursor, then PRINT" — no batch pre-clearing.
+    // Each character write in printToScreen already clears its cell.
 
     const trimmed = content.trimEnd();
     if (trimmed.endsWith(';') || trimmed.endsWith(',')) {
@@ -1877,24 +1871,14 @@ _populateGitHubDropdowns() {
 
     const basFiles = [
         'Basic_Code_Examples/Hello_world.bas',
-        'Basic_Code_Examples/Example.bas',
-        'Basic_Code_Examples/Test.bas',
-        'Basic_Code_Examples/String_test.bas',
-        'Basic_Code_Examples/Line_by_line_test.bas',
-        'Basic_Code_Examples/complex_test_suite.bas',
         'Basic_Code_Examples/screentest.bas',
-        'Basic_Code_Examples/inkey.bas',
         'Basic_Code_Examples/Hi_Low.bas',
-        'Basic_Code_Examples/Falling_star.bas',
         'Basic_Code_Examples/hangman.bas',
         'Basic_Code_Examples/snake_simple.bas',
         'Basic_Code_Examples/Snake.bas',
         'Basic_Code_Examples/asteroid.bas',
         'Basic_Code_Examples/breakout_II.bas',
-        'Basic_Code_Examples/Invaders_IV.bas',
         'Basic_Code_Examples/Invaders_V.bas',
-        'Basic_Code_Examples/Invaders_VI.bas',
-        'Basic_Code_Examples/Invaders_full.bas',
         'Basic_Code_Examples/STARTREK.bas',
         'Basic_Code_Examples/Midway_Campaign_TRS80.bas',
         'Scott_Adams_Basic_version/SCOTTADV.BAS',
