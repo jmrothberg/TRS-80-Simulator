@@ -147,9 +147,13 @@ class TRS80Simulator:
         self.main_frame = tk.Frame(master, bg="lightgrey")
         self.main_frame.pack(fill=tk.BOTH, expand=True)
 
+        # Vertical splitter: screen (min height = canvas + padding) + BASIC editor (drag sash to resize height).
+        # Both panes span the full content width so the code area matches the display width above.
+        self.main_pane = tk.PanedWindow(self.main_frame, orient=tk.VERTICAL, sashwidth=6, sashrelief=tk.RAISED, bg="lightgray")
+        self.main_pane.pack(fill=tk.BOTH, expand=True, pady=0)
+
         # Create a frame to hold the TRS-80 screen
-        self.screen_frame = tk.Frame(self.main_frame, bg="gray", padx=5, pady=5)
-        self.screen_frame.pack(pady=0)
+        self.screen_frame = tk.Frame(self.main_pane, bg="gray", padx=5, pady=5)
 
         # Create the TRS-80 screen (128x48 pixels, but each pixel is 4 screen pixels for 7" screen)
         self.pixel_size = PIXEL_SIZE * self.scale_factor  # Each pixel is 4 screen pixels, scaled
@@ -163,9 +167,15 @@ class TRS80Simulator:
         self.screen.config(takefocus=1)
         self.screen.bind("<Button-1>", lambda event: self.set_screen_focus())
 
-        # Create the BASIC input area - reduced size for 7" screen
-        self.input_area = scrolledtext.ScrolledText(self.main_frame, width=64, height=4, bg="lightgray", fg="black", font=("Courier", self.input_font_size))
-        self.input_area.pack(pady=5)
+        # BASIC input: full width of pane; vertical size set by sash (minsize on bottom pane).
+        # height=4 matches the pre-splitter default so initial layout leaves room for the button row.
+        self.input_wrap = tk.Frame(self.main_pane, bg="lightgray")
+        self.input_area = scrolledtext.ScrolledText(self.input_wrap, height=4, bg="lightgray", fg="black", font=("Courier", self.input_font_size))
+        self.input_area.pack(fill=tk.BOTH, expand=True)
+
+        _screen_pane_minsize = int(INITIAL_HEIGHT * self.scale_factor) + 10  # canvas + screen_frame pady (5+5)
+        self.main_pane.add(self.screen_frame, minsize=_screen_pane_minsize)
+        self.main_pane.add(self.input_wrap, minsize=80)
         
         # Add right-click menu for cut, copy, paste
         self.create_right_click_menu()
@@ -361,6 +371,8 @@ class TRS80Simulator:
         
         # Set main window size and position for 7" screen
         self.optimize_for_7inch_screen()
+        # After geometry is applied, place sash so code pane ~4 lines (not half the window); keeps buttons visible.
+        self.master.after_idle(self._apply_initial_code_pane_sash)
 
     def optimize_for_7inch_screen(self):
         """Optimize window layout for 7" Raspberry Pi screen (800x480)"""
@@ -3756,11 +3768,40 @@ class TRS80Simulator:
         self._screen_font = ("Courier", self.base_font_size * self.scale_factor)
         self.screen.config(width=INITIAL_WIDTH * self.scale_factor, height=INITIAL_HEIGHT * self.scale_factor)
 
+        # Keep screen pane min height in sync with scaled canvas (so 1x/2x does not clip the display).
+        if hasattr(self, "main_pane"):
+            self.main_pane.paneconfig(self.screen_frame, minsize=int(INITIAL_HEIGHT * self.scale_factor) + 10)
+
         # Resize the font for input area
         self.input_area.config(font=("Courier", self.input_font_size* self.scale_factor))
 
         # Redraw the screen content
         self.redraw_screen()
+        # Re-apply sash after 1x/2x scale (screen min height changes).
+        self.master.after_idle(self._apply_initial_code_pane_sash)
+
+    def _apply_initial_code_pane_sash(self):
+        """Set vertical sash so BASIC pane starts ~4 lines tall (old default), not maximized in the PanedWindow."""
+        try:
+            self.update_idletasks()
+            pw_h = self.main_pane.winfo_height()
+            if pw_h <= 1:
+                self.master.after(10, self._apply_initial_code_pane_sash)
+                return
+            sw = int(self.main_pane.cget("sashwidth"))
+            bot_minsize = 80  # must match main_pane.add(self.input_wrap, minsize=...)
+            self.input_area.config(height=4)
+            self.input_area.update_idletasks()
+            self.input_wrap.update_idletasks()
+            bot_h = max(self.input_wrap.winfo_reqheight(), bot_minsize)
+            min_top = int(INITIAL_HEIGHT * self.scale_factor) + 10
+            max_sash = pw_h - sw - bot_minsize
+            newpos = pw_h - sw - bot_h
+            newpos = max(newpos, min_top)
+            newpos = min(newpos, max_sash)
+            self.main_pane.sash_place(0, 0, newpos)
+        except tk.TclError:
+            pass
 
     # ============================================================
     #  SECTION: Immediate Mode
