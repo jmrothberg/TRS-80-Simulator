@@ -280,6 +280,7 @@ SQR(x)          ' Square root
 SIN(x)          ' Sine (radians)
 COS(x)          ' Cosine (radians)  
 TAN(x)          ' Tangent (radians)
+ATN(x)          ' Arctangent (radians); Level II compatible, used by some ports
 ```
 
 ### Exponential/Logarithmic

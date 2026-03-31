@@ -16,6 +16,7 @@
 #    Mar 22 2026 - Performance optimizations (single-pass keyword
 #                  replacement, cached fonts/dimensions, canvas
 #                  itemconfigure, guarded debug prints)
+#    Mar 30 2026 - PRINT@ fixes, cursor handling improvements
 #
 # ---------------------------------------------------------------------------
 #  HOW THE INTERPRETER WORKS  (read this before diving into the code)
@@ -119,7 +120,7 @@ class TRS80Simulator:
     # ============================================================
     def __init__(self, master):
         self.master = master
-        master.title("JMR's TRS-80 Simulator v1.2")
+        master.title("JMR's TRS-80 Simulator v1.5")
 
         # Detect if running on Raspberry Pi to disable 2x scaling
         self.is_raspberry_pi = self.detect_raspberry_pi()
@@ -477,7 +478,9 @@ class TRS80Simulator:
         self._regex_cache['poke'] = re.compile(r'POKE\s+(.+?)\s*,\s*(.+)')
         self._regex_cache['set_reset'] = re.compile(r'(SET|RESET)\s*\(\s*((?:[^(),]+|\([^()]*\))*)\s*,\s*((?:[^(),]+|\([^()]*\))*)\s*\)')
         self._regex_cache['tab'] = re.compile(r'TAB\((\d+)\)')
-        self._regex_cache['func_match'] = re.compile(r'(INT|SIN|COS|TAN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(')
+        # ATN must be listed: else ATN(x) reaches eval() unnamed and _eval_nested falls back to returning the raw expr string,
+        # which can be stored in arrays (e.g. F(0,4)=A after 12500) and later breaks SIN(F(I,4)) with float() on that string.
+        self._regex_cache['func_match'] = re.compile(r'(INT|SIN|COS|TAN|ATN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(')
         self._regex_cache['quotes'] = re.compile(r'(?<!\\)"')
         self._regex_cache['quotes_single'] = re.compile(r"(?<!\\)'")
         self._regex_cache['string_split'] = re.compile(r"""("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')""")
@@ -1216,21 +1219,29 @@ class TRS80Simulator:
                 if self.cursor_row >= 16:
                     self._scroll_screen_up()
                     chars_to_draw = []
-            else:
-                self.screen_content[self.cursor_row][self.cursor_col] = char
-                row, col = self.cursor_row, self.cursor_col
-                chars_to_draw.append((col * char_w, row * char_h, char, row, col))
-                self.cursor_col += 1
+                if char == '\n':
+                    continue  # Newline is a control code — no character drawn
+                # Column overflow: char is printable, draw it on the new row
+            self.screen_content[self.cursor_row][self.cursor_col] = char
+            row, col = self.cursor_row, self.cursor_col
+            chars_to_draw.append((col * char_w, row * char_h, char, row, col))
+            self.cursor_col += 1
 
-        # Draw all characters using itemconfigure when item exists, create_text otherwise
+        # Draw all characters — clear each cell first (one char per cell, no overlap)
         screen = self.screen
         font = self._screen_font
         for x, y, char, row, col in chars_to_draw:
             tag = f"c{row}_{col}"
+            # Clear the cell: delete any previous canvas items at this position
             items = screen.find_withtag(tag)
             if items:
-                screen.itemconfigure(items[0], text=char)
-            else:
+                screen.delete(items[0])
+            # Black-fill the cell area to erase any orphan rectangles/debris
+            screen.create_rectangle(
+                x, y, x + char_w, y + char_h,
+                fill="black", outline="black", tags=("_cellbg",))
+            # Draw the character (if not a space)
+            if char != ' ':
                 screen.create_text(x, y, text=char,
                     font=font, fill="lime", anchor="nw", tags=tag)
 
@@ -1282,9 +1293,16 @@ class TRS80Simulator:
 
                 x = self.cursor_col * self._char_w
                 y = self.cursor_row * self._char_h
-                self.screen.create_text(x, y, text=char.upper(), font=self._screen_font, fill="lime", anchor="nw")
+                uc = char.upper()
+                tag = f"c{self.cursor_row}_{self.cursor_col}"
+                old = self.screen.find_withtag(tag)
+                if old:
+                    self.screen.delete(old[0])
+                self.screen.create_rectangle(x, y, x + self._char_w, y + self._char_h,
+                    fill="black", outline="black", tags=("_cellbg",))
+                self.screen.create_text(x, y, text=uc, font=self._screen_font, fill="lime", anchor="nw", tags=tag)
 
-                self.screen_content[self.cursor_row][self.cursor_col] = char.upper()
+                self.screen_content[self.cursor_row][self.cursor_col] = uc
                 self._input_buffer += char.upper()
                 self.cursor_col += 1
                 if self.cursor_col >= 64:
@@ -1341,11 +1359,13 @@ class TRS80Simulator:
             for var_spec, val in zip(self.input_variables, parts):
                 self._assign_input_value(var_spec, val)
             
-            # Move to the next line
-            self.cursor_row += 1
+            # Advance cursor without scrolling: scrolling here ran before the next
+            # BASIC statement (e.g. CLS in HELP) and destroyed full-screen layouts.
             self.cursor_col = 0
-            if self.cursor_row >= 16:
-                self._scroll_screen_up()
+            if self.cursor_row < 15:
+                self.cursor_row += 1
+            else:
+                self.cursor_row = 15
 
             self.waiting_for_input = False
             self.input_variables = None
@@ -2238,7 +2258,6 @@ class TRS80Simulator:
 
     def _cmd_print(self, command):
         is_print_at = command.startswith('PRINT@')
-        original_row, original_col = self.cursor_row, self.cursor_col
 
         if is_print_at:
             match = self._regex_cache['print_at'].match(command)
@@ -2284,28 +2303,13 @@ class TRS80Simulator:
                     output += ' ' * spaces_to_add
                     cursor_pos += spaces_to_add
 
-        if is_print_at and output:
-            # Batch clear with a single rectangle instead of per-character
-            clear_len = min(len(output), 64 - self.cursor_col)
-            if clear_len > 0:
-                x_start = self.cursor_col * self._char_w
-                y_start = self.cursor_row * self._char_h
-                self.screen.create_rectangle(
-                    x_start, y_start,
-                    x_start + clear_len * self._char_w,
-                    y_start + self._char_h,
-                    fill="black", outline="black"
-                )
-                for i in range(clear_len):
-                    self.screen_content[self.cursor_row][self.cursor_col + i] = ' '
-
         if content.rstrip().endswith((';', ',')):
             self.print_to_screen(output, end='')
         else:
             self.print_to_screen(output, end='\n')
 
-        if is_print_at:
-            self.cursor_row, self.cursor_col = original_row, original_col
+        # Do not restore cursor after PRINT@ — Level II leaves the cursor after
+        # the printed text so INPUT's ? prompt follows the last PRINT (not 0,0).
 
     def _cmd_let(self, command):
         # TRS-80: LET A=1:B=2 — split on unquoted colons so each assignment
@@ -2822,7 +2826,7 @@ class TRS80Simulator:
     #    6. Calls Python eval() in a restricted namespace
     # ============================================================
     _PROTECTED_FUNCTIONS = frozenset([
-        'SIN', 'COS', 'TAN', 'EXP', 'LOG', 'SQR', 'ABS', 'INT', 'RND',
+        'SIN', 'COS', 'TAN', 'ATN', 'EXP', 'LOG', 'SQR', 'ABS', 'INT', 'RND',
         'CHR$', 'STR$', 'LEFT$', 'RIGHT$', 'MID$', 'INSTR', 'LEN',
         'ASC', 'VAL', 'PEEK', 'POINT', 'FIX', 'SGN', 'STRING$'
     ])
@@ -3310,15 +3314,16 @@ class TRS80Simulator:
             'SIN': lambda v, ie: math.sin(float(v)),
             'COS': lambda v, ie: math.cos(float(v)),
             'TAN': lambda v, ie: math.tan(float(v)),
+            'ATN': lambda v, ie: math.atan(float(v)),
             'SQR': lambda v, ie: math.sqrt(float(v)),
             'LOG': lambda v, ie: math.log(float(v)),
             'EXP': lambda v, ie: math.exp(float(v)),
             'SGN': lambda v, ie: -1 if float(v) < 0 else (1 if float(v) > 0 else 0),
             'ABS': lambda v, ie: abs(float(v)),
             'FIX': lambda v, ie: math.trunc(float(v)),
-            'VAL': lambda v, ie: (lambda s: int(float(s)) if float(s) == int(float(s)) else float(s))(str(v).strip("'\"")),
+            'VAL': lambda v, ie: (lambda s: 0 if s == '' else (int(float(s)) if float(s) == int(float(s)) else float(s)))(str(v).strip("'\"")),
             'RND': self._func_rnd,
-            'ASC': lambda v, ie: ord(str(v).strip("'\"")),
+            'ASC': lambda v, ie: ord(str(v).strip("'\"")[0]) if str(v).strip("'\"") else 0,
             'PEEK': lambda v, ie: self.peek(int(v)),
             'POINT': self._func_point,
             'LEN': lambda v, ie: len(str(v)),
