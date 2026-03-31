@@ -335,6 +335,7 @@ _compileRegexPatterns() {
     this._re.ifThen       = /^IF\s+(.*?)\s+THEN\s+(.*?)(\s+ELSE\s+(.*))?$/;
     this._re.forLoop      = /^FOR\s+(\w+)\s*=\s*(.+?)\s+TO\s+(.+?)(\s+STEP\s+(.+))?$/;
     this._re.onGoto       = /^ON\s+(.*?)\s+GOTO\s+(.*)/;
+    this._re.onGosub      = /^ON\s+(.*?)\s+GOSUB\s+(.*)/;
     this._re.dim          = /^DIM\s+(\w+\$?)\((.+)\)$/;
     this._re.poke         = /^POKE\s+(.+?)\s*,\s*(.+)/;
     this._re.tab          = /TAB\((\d+)\)/;
@@ -469,6 +470,7 @@ Program Statements:
   INPUT ["prompt";] var [, var2 ...]
   GOTO line
   ON expr GOTO line1, line2, ...
+  ON expr GOSUB line1, line2, ...
   IF cond THEN action [ELSE action]
   FOR var = start TO end [STEP s]
   NEXT [var]
@@ -1161,7 +1163,8 @@ async executeNextLine() {
             this._flushGraphics();
             this.debugPrint('Program execution completed');
             if (this.variablesWindowOpen) this._updateVariablesContent();
-            if (!this.immediateMode) this.enableImmediateMode();
+            // Always re-enable: newProgram() clears state but RUN from the button leaves immediateMode true.
+            this.enableImmediateMode();
             this._focusForInput();
             return;
         }
@@ -1193,8 +1196,9 @@ async executeNextLine() {
                     this.currentLineIndex = newIndex;
                 } else {
                     this._errorUl(result);
-                    this.programRunning = false;
                     if (this.variablesWindowOpen) this._updateVariablesContent();
+                    this.enableImmediateMode();
+                    this._focusForInput();
                     return;
                 }
             } else if (this.waitingForInput) {
@@ -1225,8 +1229,19 @@ async executeNextLine() {
         if (this.stepping) {
             this._flushGraphics();
             if (this.variablesWindowOpen) this._updateVariablesContent();
+            if (!this.programRunning) {
+                this.enableImmediateMode();
+                this._focusForInput();
+            }
             return;
         }
+    }
+    // END leaves programRunning false without hitting the natural-completion block above.
+    if (!this.programRunning && !this.waitingForInput) {
+        this._setStopBtn(false);
+        this._flushGraphics();
+        this.enableImmediateMode();
+        this._focusForInput();
     }
     if (this.variablesWindowOpen) this._updateVariablesContent();
 }
@@ -1774,7 +1789,18 @@ _cmdNext(command) {
 }
 
 _cmdOn(command) {
-    const m = command.match(this._re.onGoto);
+    let m = command.match(this._re.onGosub);
+    if (m) {
+        const value = Math.trunc(this.evaluateExpression(m[1]));
+        const targets = m[2].split(',').map(s => parseInt(s.trim()));
+        if (value >= 1 && value <= targets.length) {
+            const lineNum = targets[value - 1];
+            this.gosubStack.push(this.currentLineIndex + 1);
+            return lineNum;
+        }
+        return undefined;
+    }
+    m = command.match(this._re.onGoto);
     if (m) {
         const value = Math.trunc(this.evaluateExpression(m[1]));
         const targets = m[2].split(',').map(s => parseInt(s.trim()));
@@ -2790,23 +2816,77 @@ _getCurrentLineNumber() {
     return '?';
 }
 
-_errorSn(detail = '') { const ln = this._getCurrentLineNumber(); const msg = `?SN ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(detail ? `${msg} - ${detail}` : msg, 'error'); }
-_errorFc(detail = '') { const ln = this._getCurrentLineNumber(); const msg = `?FC ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(detail ? `${msg} - ${detail}` : msg, 'error'); }
-_errorUl(lineNum)     { const ln = this._getCurrentLineNumber(); const msg = `?UL ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(`${msg} - Line ${lineNum} not found`, 'error'); }
+_errorDebugContext(msg) {
+    if (this.currentLineIndex < this._lineCommands.length) {
+        const src = this._lineCommands[this.currentLineIndex];
+        this.debugPrint(`  ${msg} — source: ${src.substring(0, 200)}`, 'error');
+    }
+}
+
+_errorStopRun() {
+    this.programRunning = false;
+    this._setStopBtn(false);
+}
+
+_errorSn(detail = '') {
+    const ln = this._getCurrentLineNumber();
+    const msg = `?SN ERROR IN ${ln}`;
+    this.printToScreen(msg);
+    this.debugPrint(detail ? `${msg} — ${detail}` : msg, 'error');
+    this._errorDebugContext(msg);
+    this._errorStopRun();
+}
+_errorFc(detail = '') {
+    const ln = this._getCurrentLineNumber();
+    const msg = `?FC ERROR IN ${ln}`;
+    this.printToScreen(msg);
+    this.debugPrint(detail ? `${msg} — ${detail}` : msg, 'error');
+    this._errorDebugContext(msg);
+    this._errorStopRun();
+}
+_errorUl(lineNum) {
+    const ln = this._getCurrentLineNumber();
+    const msg = `?UL ERROR IN ${ln}`;
+    this.printToScreen(msg);
+    this.debugPrint(`${msg} — undefined line ${lineNum}`, 'error');
+    this._errorDebugContext(msg);
+    this._errorStopRun();
+}
 _errorBs(arr, idx) {
     const ln = this._getCurrentLineNumber();
     const msg = `?BS ERROR IN ${ln}`;
     const arrLen = this.arrayVariables[arr] ? this.arrayVariables[arr].length : '?';
     this.printToScreen(msg);
-    this.debugPrint(`${msg} - ${arr}(${idx}) out of bounds (array size ${arrLen})`, 'error');
-    // Show relevant variable values for debugging
+    this.debugPrint(`${msg} — ${arr}(${idx}) out of bounds (array size ${arrLen})`, 'error');
+    this._errorDebugContext(msg);
     const dbgVars = ['X','Y','R','C','I','DX','DY'].filter(v => this.scalarVariables.hasOwnProperty(v)).map(v => `${v}=${this.scalarVariables[v]}`).join(', ');
     if (dbgVars) this.debugPrint(`Variables: ${dbgVars}`, 'error');
-    this.programRunning = false;
+    this._errorStopRun();
 }
-_errorOd()            { const ln = this._getCurrentLineNumber(); const msg = `?OD ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(msg, 'error'); }
-_errorNf(v)           { const ln = this._getCurrentLineNumber(); const msg = `?NF ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(v ? `${msg} - Variable ${v}` : msg, 'error'); }
-_errorRg()            { const ln = this._getCurrentLineNumber(); const msg = `?RG ERROR IN ${ln}`; this.printToScreen(msg); this.debugPrint(msg, 'error'); }
+_errorOd() {
+    const ln = this._getCurrentLineNumber();
+    const msg = `?OD ERROR IN ${ln}`;
+    this.printToScreen(msg);
+    this.debugPrint(`${msg} — READ past last DATA item`, 'error');
+    this._errorDebugContext(msg);
+    this._errorStopRun();
+}
+_errorNf(v) {
+    const ln = this._getCurrentLineNumber();
+    const msg = `?NF ERROR IN ${ln}`;
+    this.printToScreen(msg);
+    this.debugPrint(v ? `${msg} — variable ${v}` : `${msg} — NEXT without matching FOR`, 'error');
+    this._errorDebugContext(msg);
+    this._errorStopRun();
+}
+_errorRg() {
+    const ln = this._getCurrentLineNumber();
+    const msg = `?RG ERROR IN ${ln}`;
+    this.printToScreen(msg);
+    this.debugPrint(`${msg} — stack empty`, 'error');
+    this._errorDebugContext(msg);
+    this._errorStopRun();
+}
 
 // ------------------------------------------------------------------
 //  Utilities

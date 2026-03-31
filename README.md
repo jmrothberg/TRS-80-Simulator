@@ -160,6 +160,7 @@ The `Basic_Code_Examples/` directory contains:
 | `breakout_II.bas` | Breakout clone |
 | `Hi_Low.bas` | Number guessing game |
 | `hangman.bas` | Hangman word game |
+| `hamurabi.bas` | *Hamurabi* (David Ahl, *BASIC Computer Games*, 1978); ancient Sumer grain/land simulation — uses `RND(0)` for Level II |
 | `Midway_Campaign_TRS80.bas` | *Midway Campaign* (Battle of Midway): `PRINT@` map, T/A/L/CA/CL, help; listed in the web **Examples** menu (GitHub raw) |
 | `Midway_Campaign_Atari8_LISTING.txt` | ASCII listing of *Midway Campaign* detokenized from **Atari BASIC** (see note below — not for this TRS-80 simulator) |
 | `complex_test_suite.bas` | Comprehensive BASIC feature tests |

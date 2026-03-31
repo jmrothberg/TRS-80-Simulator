@@ -133,7 +133,7 @@ class TRS80Simulator:
     # ============================================================
     def __init__(self, master):
         self.master = master
-        master.title("JMR's TRS-80 Simulator v1.5")
+        master.title("JMR's TRS-80 Simulator v1.7")
 
         # Detect if running on Raspberry Pi to disable 2x scaling
         self.is_raspberry_pi = self.detect_raspberry_pi()
@@ -319,8 +319,6 @@ class TRS80Simulator:
         
         self.new_program()
         self.create_debug_window()
-        self.last_key_time = 0
-        self.key_check_interval = .05  # 100 milliseconds
         self.replaced = False
         
         # Bind input area changes to sync with stored_program
@@ -501,6 +499,7 @@ class TRS80Simulator:
         self._regex_cache['if_then'] = re.compile(r'IF\s+(.*?)\s+THEN\s+(.*?)(\s+ELSE\s+(.*))?$')
         self._regex_cache['for_loop'] = re.compile(r'FOR\s+(\w+)\s*=\s*(.+?)\s+TO\s+(.+?)(\s+STEP\s+(.+))?$')
         self._regex_cache['on_goto'] = re.compile(r'ON\s+(.*?)\s+GOTO\s+(.*)')
+        self._regex_cache['on_gosub'] = re.compile(r'ON\s+(.*?)\s+GOSUB\s+(.*)')
         self._regex_cache['dim'] = re.compile(r'DIM\s+(\w+\$?)\((.+)\)')
         self._regex_cache['poke'] = re.compile(r'POKE\s+(.+?)\s*,\s*(.+)')
         self._regex_cache['set_reset'] = re.compile(r'(SET|RESET)\s*\(\s*((?:[^(),]+|\([^()]*\))*)\s*,\s*((?:[^(),]+|\([^()]*\))*)\s*\)')
@@ -1409,7 +1408,8 @@ class TRS80Simulator:
             return "break"
 
     def break_program(self):
-        """Handle BREAK key press - stop program and show break message"""
+        """Handle BREAK (Esc / Ctrl+C) — like the Model I BREAK key: stop run, show
+        BREAK IN line, return to immediate mode with > prompt."""
         if self.program_running:
             # Show BREAK message like original TRS-80
             if self.current_line_index < len(self.sorted_program):
@@ -1697,9 +1697,9 @@ class TRS80Simulator:
                 self.debug_print("Program execution completed")
                 # Flush any remaining graphics
                 self._flush_graphics()
-                # Only enable immediate mode if we're not already in it
-                if not self.immediate_mode:
-                    self.enable_immediate_mode()  # Re-enable immediate mode
+                # Always re-enable: new_program() unbinds keys but may leave immediate_mode True
+                # (RUN button), so we must re-bind and redraw the > prompt.
+                self.enable_immediate_mode()
                 self.set_screen_focus()  # Restore focus to green screen
                 return
 
@@ -1726,7 +1726,8 @@ class TRS80Simulator:
                         self.current_line_index = new_index
                     else:
                         self._error_ul(result)
-                        self.program_running = False
+                        self.enable_immediate_mode()
+                        self.set_screen_focus()
                         return
                 elif self.waiting_for_input:
                     # Flush graphics before waiting for input
@@ -1745,7 +1746,18 @@ class TRS80Simulator:
                 self.debug_print("Stepping through the program")
                 # Flush graphics when stepping
                 self._flush_graphics()
+                if not self.program_running:
+                    self.enable_immediate_mode()
+                    self.set_screen_focus()
                 return
+
+        # END (and similar) sets program_running False without hitting the natural-end block above.
+        if not self.program_running and not self.waiting_for_input:
+            self.stop_button.config(state=tk.DISABLED)
+            self.step_button.config(state=tk.NORMAL)
+            self._flush_graphics()
+            self.enable_immediate_mode()
+            self.set_screen_focus()
 
     def update_variables_window(self):
         if self.variables_window_open:
@@ -2124,54 +2136,80 @@ class TRS80Simulator:
             return str(int(ln)) if ln == int(ln) else str(ln)
         return '?'
 
+    def _error_stop_program(self):
+        """After a printed ?XX ERROR, stop run and match UI to other stop paths."""
+        self.program_running = False
+        self.stop_button.config(state=tk.DISABLED)
+
+    def _error_debug_context(self, msg):
+        """TRS-80 style message already on screen; add line text to debug only."""
+        if self.current_line_index < len(self._line_commands):
+            cmd = self._line_commands[self.current_line_index]
+            self.debug_print(f"  {msg} — source: {cmd[:200]}", 'error')
+
     def _error_sn(self, detail=''):
         """?SN ERROR - Syntax Error"""
         ln = self._get_current_line_number()
         msg = f"?SN ERROR IN {ln}"
         self.print_to_screen(msg)
-        self.debug_print(f"{msg} - {detail}" if detail else msg, 'error')
+        self.debug_print(f"{msg}" + (f" — {detail}" if detail else ""), 'error')
+        self._error_debug_context(msg)
+        self._error_stop_program()
 
     def _error_fc(self, detail=''):
         """?FC ERROR - Illegal Function Call"""
         ln = self._get_current_line_number()
         msg = f"?FC ERROR IN {ln}"
         self.print_to_screen(msg)
-        self.debug_print(f"{msg} - {detail}" if detail else msg, 'error')
+        self.debug_print(f"{msg}" + (f" — {detail}" if detail else ""), 'error')
+        self._error_debug_context(msg)
+        self._error_stop_program()
 
     def _error_ul(self, line_num):
         """?UL ERROR - Undefined Line"""
         ln = self._get_current_line_number()
         msg = f"?UL ERROR IN {ln}"
         self.print_to_screen(msg)
-        self.debug_print(f"{msg} - Line {line_num} not found", 'error')
+        self.debug_print(f"{msg} — undefined line {line_num}", 'error')
+        self._error_debug_context(msg)
+        self._error_stop_program()
 
     def _error_bs(self, array_name='', index=0):
         """?BS ERROR - Bad Subscript"""
         ln = self._get_current_line_number()
         msg = f"?BS ERROR IN {ln}"
         self.print_to_screen(msg)
-        self.debug_print(f"{msg} - Index {index} out of bounds for {array_name}", 'error')
+        self.debug_print(
+            f"{msg} — {array_name}({index}) out of bounds", 'error')
+        self._error_debug_context(msg)
+        self._error_stop_program()
 
     def _error_od(self):
         """?OD ERROR - Out of Data"""
         ln = self._get_current_line_number()
         msg = f"?OD ERROR IN {ln}"
         self.print_to_screen(msg)
-        self.debug_print(msg, 'error')
+        self.debug_print(f"{msg} — READ past last DATA item", 'error')
+        self._error_debug_context(msg)
+        self._error_stop_program()
 
     def _error_nf(self, var=''):
         """?NF ERROR - NEXT without FOR"""
         ln = self._get_current_line_number()
         msg = f"?NF ERROR IN {ln}"
         self.print_to_screen(msg)
-        self.debug_print(f"{msg} - Variable {var}" if var else msg, 'error')
+        self.debug_print(f"{msg}" + (f" — variable {var}" if var else " — NEXT without matching FOR"), 'error')
+        self._error_debug_context(msg)
+        self._error_stop_program()
 
     def _error_rg(self):
         """?RG ERROR - RETURN without GOSUB"""
         ln = self._get_current_line_number()
         msg = f"?RG ERROR IN {ln}"
         self.print_to_screen(msg)
-        self.debug_print(msg, 'error')
+        self.debug_print(f"{msg} — stack empty", 'error')
+        self._error_debug_context(msg)
+        self._error_stop_program()
 
     # ============================================================
     #  SECTION: Interpreter Core — Command Dispatch
@@ -2741,6 +2779,19 @@ class TRS80Simulator:
             self._error_nf('')
 
     def _cmd_on(self, command):
+        # Try ON ... GOSUB first (Model I Level II has both ON GOTO and ON GOSUB).
+        match = self._regex_cache['on_gosub'].match(command)
+        if match:
+            expression, line_numbers = match.groups()
+            value = int(self.evaluate_expression(expression))
+            targets = [int(ln.strip()) for ln in line_numbers.split(',')]
+            if 1 <= value <= len(targets):
+                line_number = targets[value - 1]
+                self.gosub_stack.append(self.current_line_index + 1)
+                if self.debug_mode:
+                    self.debug_print(f"ON ... GOSUB -> {line_number} (depth {len(self.gosub_stack)})")
+                return line_number
+            return None
         match = self._regex_cache['on_goto'].match(command)
         if match:
             expression, line_numbers = match.groups()
@@ -3513,16 +3564,19 @@ class TRS80Simulator:
 
         
     def peek(self, address):
+        # 14400: games poll in tight loops; process Tk events then return last key
+        # code once (same consumption as INKEY$). Do not time-gate reads — that caused
+        # mostly 0 in fast PEEK(14400) loops.
         if address == 14400:
-            current_time = time.time()
-            if current_time - self.last_key_time >= self.key_check_interval:
-                self.master.update_idletasks()  # Process events without full GUI update
-                self.last_key_time = current_time
-                if self.last_key_pressed:
-                    key_value = ord(self.last_key_pressed)
-                    self.debug_print(f"KEY PEEK -> {self.last_key_pressed} ({key_value})")
-                    self.last_key_pressed = None
-                    return key_value
+            # Only pump Tk events when no key is already buffered — avoids slowing
+            # tight PEEK(14400) loops with update_idletasks on every call.
+            if not self.last_key_pressed:
+                self.master.update_idletasks()
+            if self.last_key_pressed:
+                key_value = ord(self.last_key_pressed)
+                self.debug_print(f"KEY PEEK -> {self.last_key_pressed} ({key_value})")
+                self.last_key_pressed = None
+                return key_value
             return 0
         elif 15360 <= address <= 16383:
             screen_pos = address - 15360
@@ -4074,6 +4128,7 @@ Program Commands:
 - INPUT variable or INPUT "prompt"; variable
 - GOTO line_number
 - ON expression GOTO line1, line2, ...
+- ON expression GOSUB line1, line2, ...
 - IF condition THEN action [ELSE action]
 - FOR variable = start TO end [STEP step]
 - NEXT [variable]

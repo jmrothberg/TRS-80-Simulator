@@ -1,527 +1,283 @@
-# TRS-80 Model I Level II BASIC Reference Guide
+# TRS-80 Model I Level II BASIC — Reference (machine + this interpreter)
 
-This document provides a complete reference for the BASIC language as implemented in this TRS-80 simulator, based on the 1978 Radio Shack TRS-80 Model I Level II BASIC interpreter.
+This guide describes **Radio Shack TRS-80 Model I Level II BASIC** as it was documented on the **original hardware** (1978-era ROM). Where this project’s **Python / web interpreter** behaves differently, that is called out explicitly — look for **Interpreter:** notes.
 
-## Table of Contents
-- [Overview](#overview)
-- [Immediate Mode Commands](#immediate-mode-commands)
-- [Language Limitations](#language-limitations)
-- [Variable Types](#variable-types)
-- [Program Structure](#program-structure)
-- [Commands](#commands)
-- [Mathematical Functions](#mathematical-functions)
-- [String Functions](#string-functions)
-- [System Functions](#system-functions)
-- [Graphics Commands](#graphics-commands)
-- [Memory and I/O](#memory-and-io)
-- [Operators](#operators)
-- [Syntax Rules](#syntax-rules)
-- [Memory Map](#memory-map)
+---
+
+## Table of contents
+
+- [How to use this document](#how-to-use-this-document)
+- [Original machine: overview](#original-machine-overview)
+- [Interpreter differences (summary)](#interpreter-differences-summary)
+- [Immediate mode and commands](#immediate-mode-and-commands)
+- [Program statements](#program-statements)
+- [Expressions, operators, functions](#expressions-operators-and-functions)
+- [`DEF FN` (user-defined functions)](#def-fn-user-defined-functions)
+- [Graphics](#graphics)
+- [Memory, PEEK/POKE, cassette](#memory-peekpoke-cassette)
+- [Limitations (Level II)](#limitations-level-ii)
+- [Syntax and style](#syntax-and-style)
+- [Memory map (Model I)](#memory-map-model-i)
 - [Examples](#examples)
 
-## Overview
+---
 
-This TRS-80 BASIC simulator implements the authentic Level II BASIC interpreter from 1978. It includes all the limitations, quirks, and exact behavior of the original system.
+## How to use this document
 
-**Screen Specifications:**
-- Text: 64 columns × 16 rows
-- Graphics: 128 × 48 pixels
-- Coordinates are 1-based (1,1 to 128,48 for graphics)
+- **Default text** = **Model I Level II on real hardware** (manuals / common reference material).
+- **`Interpreter:`** = **only** applies to **this simulator** (`TRS80_March_31_26.py`, `web_TRS_80/index.html`, `docs/index.html`).
 
-**Simulator Features:**
-- Authentic immediate mode on the green screen
-- Modern text editor for program editing
-- Full synchronization between both editing modes
-- Debug window with variable inspection
-- LLM Assistant support
+When behavior is unknown or ROM-dependent, that is stated.
 
-## Immediate Mode Commands
+---
 
-The simulator supports authentic TRS-80 immediate mode where you can type commands directly on the green screen when no program is running. The prompt `>` indicates immediate mode is active.
+## Original machine: overview
 
-### System Commands (Immediate Mode Only)
+| Item | Model I Level II |
+|------|-------------------|
+| Text | **64 × 16** characters |
+| Bitmap graphics | **128 × 48** pixels (SET/RESET/POINT) |
+| Line numbers | **0–65529** (65530–65535 reserved / system) |
+| Keywords | Not case-sensitive on entry; stored/listing uppercase |
+| Program storage | Lines in memory; execution in **ascending line-number order** unless redirected |
 
-```basic
-RUN
-```
-- Execute the current program from the beginning
+**`RUN`** on the real machine clears the **display** and performs the same kind of reset as **`CLEAR`** (variables, stacks, `FOR` loops, `DATA` pointer, etc.), then starts at the **smallest** line number (or at **`RUN line`** if given).
 
-```basic
-LIST [line_number]
-LIST [start_line-end_line]
-```
-- Display program listing
-- `LIST` - shows entire program
-- `LIST 100` - shows line 100
-- `LIST 10-50` - shows lines 10 through 50
+**`NEW`** clears the program and variables; it does **not** necessarily ask for confirmation on stock ROM (software overlays sometimes added prompts).
 
-```basic
-NEW
-```
-- Clear program memory and all variables
-- Prompts for confirmation
+**`CLEAR`** clears variables and control state but **keeps** the program in memory.
 
-```basic
-CLEAR
-```
-- Clear all variables but keep program
+---
 
-```basic
-CONT
-```
-- Continue execution after STOP command
+## Interpreter differences (summary)
 
-```basic
-LOAD
-```
-- Load program from file (opens file dialog)
+| Topic | Original Model I Level II | This interpreter |
+|-------|---------------------------|------------------|
+| **Editor / I/O** | Keyboard + video; programs from cassette (`CLOAD`/`CSAVE`) or disk (with DOS) | **Text area + RUN/LOAD/SAVE**; **`.bas` files** via **file dialog** for LOAD/SAVE |
+| **`NEW`** | Clears program + vars | Prints *“ARE YOU SURE?”*-style text in one code path but **does not wait** for Y/N — clears **immediately** |
+| **`ON … GOSUB`** | **Yes** — part of **stock Model I Level II BASIC** (same family as **`ON … GOTO`**) | Was **missing in this simulator**; **now implemented** (`on_gosub` + stack, same as **`GOSUB`**) |
+| **`DELAY`** | Not a standard Level II statement keyword | **Extension**: `DELAY n` → pause ≈ **`n × 10` ms** (Tk `after` on desktop) |
+| **`SYSTEM`** | Enters machine monitor / exits to DOS depending on ROM and DOS | **Not implemented** (prints a message) |
+| **`PEEK(14400)`** | Keyboard **hardware** uses specific addresses; **14400** is used in games as a **keyboard-related** location | **Simulated**: last key **ASCII** or **0**; shares buffer with **`INKEY$`** (read **consumes**). Desktop pumps Tk **only when no key is buffered**, so empty tight loops stay cheap. **Not** cycle-accurate vs real latch. |
+| **`RND`** | `RND(0)` / `RND(1)` style float; `RND(n)` integer **1..n** for **n > 1** (see manuals) | **Bare `RND`** (no `(`) is rewritten to a **new** random **float** each occurrence; **`RND(n)`** uses project rules in `_func_rnd` (float if `n≤1`, else integer **1..n**) |
+| **Tape** | `PRINT#` / `INPUT#` to cassette with hardware | **`PRINT#-1` / `INPUT#-1`** use an **in-memory “tape”** buffer |
+| **UI** | Physical keyboard | **Debug / variables / LLM** (desktop) — **not** on original hardware |
 
-```basic
-SAVE
-```
-- Save program to file (opens file dialog)
+### Interrupt — original machine vs this simulator
 
-```basic
-DELETE line_number
-DELETE start_line-end_line
-```
-- Remove program lines
-- `DELETE 50` - removes line 50
-- `DELETE 100-200` - removes lines 100 through 200
+- **Real Model I:** **BREAK** key stops the running program, prints **`BREAK IN line`**, returns to **`READY`** / **`>`**.
+- **This app (desktop):** **Esc** or **Ctrl+C** calls the same idea (`break_program`) — stops run, **`BREAK IN line`**, **`>`** prompt.
+- **Web:** Keyboard handler should offer an equivalent stop path (browser may reserve some shortcuts).
 
-```basic
-CLS
-```
-- Clear the screen
+### Screen memory `PEEK(15360–16383)`
 
-### Direct Program Entry
+- **Original:** Reads the **character code** in the **video RAM** cell.
+- **Interpreter:** Same idea — returns **`ord()`** of the character in the **emulated 64×16** buffer for that address. **Yes, this is the right model** for “read what’s on screen.”
 
-You can enter program lines directly in immediate mode:
-```basic
->10 PRINT "HELLO"
->20 GOTO 10
->RUN
-```
+---
 
-### Immediate Statement Execution
+## Immediate mode and commands
 
-Execute statements without line numbers for immediate results:
-```basic
->PRINT 2+2
-4
->A=10: PRINT A*5
-50
->PRINT "HELLO " + "WORLD"
-HELLO WORLD
-```
+On the real machine, at **`READY`** you can type **commands** (no line number) or **program lines** (with line numbers).
 
-## Language Limitations
+### Commands typically used from READY
 
-### Critical Restrictions
-- **Line Numbers Required**: All executable statements must have line numbers
-- **Variable Names**: Single letter or letter + single digit only (A, B1, X$, NAME$ not allowed)
-- **No Multidimensional Arrays**: Only single-dimension arrays supported
-- **No Local Variables**: All variables are global
-- **No Subroutine Parameters**: GOSUB routines cannot accept parameters
-- **No User-Defined Functions**: Only built-in functions available
-- **Limited String Handling**: Basic string operations only
-- **Case Insensitive**: All keywords automatically converted to uppercase
+| Command | Original Model I Level II |
+|---------|---------------------------|
+| **`RUN`** / **`RUN line`** | Start program; **`RUN`** clears screen + reset + run from first (or given) line |
+| **`LIST`** / **`LIST line`** / **`LIST l1-l2`** | List program |
+| **`NEW`** | Erase program and variables |
+| **`CLEAR`** | Clear variables / stacks; keep program |
+| **`CONT`** | Resume after **`STOP`**, **break**, or some errors (not always after every error — see manual) |
+| **`CLS`** | Clear screen |
+| **`LOAD` / `SAVE`** | With **cassette** (`CLOAD`/`CSAVE` naming in many manuals) or **disk** when DOS present |
 
-### Memory Constraints
-- Arrays must be dimensioned with DIM before use
-- Array indices start at 0, but BASIC convention uses 1-based indexing
-- String variables limited by available memory
-- Maximum line number: 65529
+**Interpreter:** **`LOAD` / `SAVE`** open a **file dialog** and read/write **plain text** into the editor. **`DELETE`** (by line or range) is supported for editing the listing. **`SYSTEM`** is stubbed.
 
-## Variable Types
+---
 
-### Numeric Variables
-```basic
-10 LET A = 5          ' Integer
-20 LET B1 = 3.14      ' Floating point
-30 LET X = -10        ' Negative numbers
-40 A = 25             ' LET is optional
-```
+## Program statements
 
-### String Variables
-```basic
-10 LET A$ = "HELLO"   ' String variable ($ required)
-20 LET B$ = ""        ' Empty string
-30 LET C$ = A$ + B$   ' String concatenation
-```
+Statements appear on **numbered lines**. Several statements may appear on one line separated by **`:`** (with rules around **`IF`**).
 
-### Arrays
-```basic
-10 DIM A(10)          ' Numeric array (0-10, 11 elements)
-20 DIM B$(5)          ' String array (0-5, 6 elements)
-30 LET A(1) = 100     ' Assign array element
-40 LET B$(0) = "TEST" ' String array element
-```
+Core Level II statements include **`PRINT`**, **`LET`** (optional), **`INPUT`**, **`GOTO`**, **`IF … THEN`**, **`FOR`/`NEXT`**, **`GOSUB`/`RETURN`**, **`ON … GOTO`**, **`ON … GOSUB`**, **`READ`/`DATA`/`RESTORE`**, **`DIM`**, **`REM`**, **`STOP`**, **`END`**, **`CLS`**, **`POKE`**, **`SET`/`RESET`**, **`DEF FN`**, **`PRINT#` / `INPUT#`** (cassette), etc.
 
-## Program Structure
+### `PRINT` and `PRINT@`
 
-### Line Numbers
-- Required for all executable statements
-- Typically increment by 10 (10, 20, 30...)
-- Can use decimal numbers (10.5, 20.1) for insertions
-- Executed in numerical order
+- **`;`** — pack output; **`,`** — **16-character** print zones; trailing **`;`** or **`,`** — suppress line advance.
+- **`PRINT@ n`** — print at character index **`n`** (0-based position in the **1024**-character text frame: **`row*64 + col`**, **row 0–15**, **col 0–63**).
 
-### Multiple Statements
-```basic
-10 LET A = 5: LET B = 10: PRINT A + B
-20 IF A > B THEN PRINT "A BIGGER": GOTO 50
-```
+### `IF … THEN … [ELSE …]`
 
-## Commands
+Level II gained **`ELSE`** in common ROM revisions; **`IF`** may compute **line-number** targets as **`THEN 100`** (implicit **`GOTO`**).
 
-### Basic I/O
-```basic
-PRINT [expression[,;expression...]]
-```
-- Output text and numbers
-- `;` - no space between items
-- `,` - tab to next print zone (16-character columns)
-- Trailing `;` or `,` suppresses newline
+**Interpreter:** Parser/preprocessor should match your **`IF`/`THEN`/`ELSE`** splitting; if something fails, compare with the real machine’s accepted forms.
+
+### `ON` — computed `GOTO` / `GOSUB`
+
+On the **original** Level II ROM, both are available:
 
 ```basic
-PRINT@ position, expression
+ON X GOTO 100,200,300
+ON X GOSUB 1000,2000,3000
 ```
-- Print at specific screen position (0-1023)
-- Position = row * 64 + column
+
+**Interpreter:** Both **`ON expr GOTO …`** and **`ON expr GOSUB …`** are implemented (same **`GOSUB`** stack as direct **`GOSUB`**).
+
+### `STOP` vs `END`
+
+- **`STOP`** — pause; prints **`BREAK IN line`** (or similar); **`CONT`** may resume.
+- **`END`** — end without the break message; **`CONT`** is **not** valid after a normal **`END`** on real Level II (**`?CN` / Can’t CONTinue**).
+
+**Interpreter:** Follows the same broad idea; exact error text may differ.
+
+### `DELAY`
+
+**Interpreter only** — not standard Level II:
 
 ```basic
-INPUT [prompt;] variable
-INPUT ["prompt"; ] variable
+DELAY 100   ' ~1000 ms (100 * 10 ms) in desktop Tk build
 ```
-- Get user input
-- Optional prompt string with semicolon
 
-### Program Control
-```basic
-GOTO line_number
-```
-- Unconditional jump to line number
+---
 
-```basic
-IF condition THEN statement [ELSE statement]
-```
-- Conditional execution
-- ELSE clause optional
+## Expressions, operators, functions
 
-```basic
-FOR variable = start TO end [STEP increment]
-NEXT [variable]
-```
-- Loop structure
-- Default STEP is 1
-- Variable name optional in NEXT
+### Operators (Level II)
 
-```basic
-ON expression GOTO line1, line2, line3...
-```
-- Computed GOTO based on expression value (1, 2, 3...)
+- Arithmetic: **`+ - * / ^`**
+- Integer remainder: **`MOD`** appears in Level II reference material (use your ROM manual if unsure).
+- Comparisons: **`= <> < > <= >=`**
+- Logical/bitwise: **`AND OR NOT`** (integer-style truth: often **−1** / **0**)
 
-```basic
-GOSUB line_number
-RETURN
-```
-- Subroutine call and return
-- Uses internal stack for nesting
+### Random numbers `RND`
 
-### Data Handling
-```basic
-DIM variable(size)
-```
-- Declare array with specified size
-- Creates size+1 elements (0 to size)
+Typical Level II usage:
+
+- **`RND(0)`** (and sometimes **`RND(1)`**) — random **fraction** in **(0,1)** or **[0,1)** per manual wording.
+- **`RND(n)`** with **integer n > 1** — random **integer** from **1** to **n** inclusive.
+
+**Interpreter:**
+
+- **Bare `RND`** (no parentheses) is replaced in the expression rewriter with a **new** float **0 ≤ x < 1** each time.
+- **`RND(n)`** via **`_func_rnd`**: **`n ≤ 1`** → float; **`n > 1`** → integer **1..n**.
+
+### Built-in functions (Level II core)
+
+Numeric: **`ABS` `INT` `FIX` `SGN` `SQR` `SIN` `COS` `TAN` `ATN` `EXP` `LOG` `RND`**
+
+String: **`LEN` `LEFT$` `RIGHT$` `MID$` `STR$` `VAL` `CHR$` `ASC` `STRING$`**
+
+Machine: **`PEEK` `POINT` `INKEY$`**
+
+**Interpreter:** **`INSTR`** is implemented for substring search. On **stock** Model I Level II, **`INSTR`** may be absent or differ — treat as **compatible extension** unless your manual lists it.
+
+---
+
+## `DEF FN` (user-defined functions)
+
+Level II allows **single-line** definitions:
 
 ```basic
-DATA value1, value2, value3...
-READ variable1, variable2...
-RESTORE
-```
-- Store and retrieve constant data
-- RESTORE resets data pointer to beginning
-
-### Program Flow
-```basic
-END
-```
-- Terminate program execution
-
-```basic
-STOP
-```
-- Pause program (can be continued)
-
-```basic
-REM comment
-```
-- Comment line (ignored during execution)
-
-```basic
-CLS
-```
-- Clear screen and home cursor
-
-## Mathematical Functions
-
-### Basic Math
-```basic
-ABS(x)          ' Absolute value
-INT(x)          ' Integer part (truncate toward zero)
-FIX(x)          ' Truncate to integer
-SGN(x)          ' Sign: -1, 0, or 1
-SQR(x)          ' Square root
+10 DEF FNA(X)=X*X+1
+20 PRINT FNA(3)
 ```
 
-### Trigonometric
-```basic
-SIN(x)          ' Sine (radians)
-COS(x)          ' Cosine (radians)  
-TAN(x)          ' Tangent (radians)
-ATN(x)          ' Arctangent (radians); Level II compatible, used by some ports
-```
+Only **`FN` + one letter** and a simple parameter list appear in classic manuals.
 
-### Exponential/Logarithmic
-```basic
-EXP(x)          ' e raised to x power
-LOG(x)          ' Natural logarithm
-```
+**Interpreter:** **`DEF FNx(...)=...`** is parsed into a table; **`FNx(...)`** is expanded during evaluation. Match **`TRS80_March_31_26.py`** for exact regex (parameter naming).
 
-### Random Numbers
-```basic
-RND             ' Random float 0.0 to 0.999999
-RND(0)          ' New random float 0.0 to 0.999999 (same as RND)
-RND(1)          ' New random float 0.0 to 0.999999 (used for probabilities)
-RND(n)          ' n > 1: random INTEGER 1 to n    (used for coordinates/dice)
-```
-Note: `RND(0)` and `RND(1)` both generate a new float — used throughout games
-like Midway Campaign and STARTREK for probability checks (e.g. `IF RND(0)>0.5`).
-`RND(n)` with n>1 returns an integer for things like random grid positions.
+---
 
-## String Functions
+## Graphics
 
-### String Manipulation
-```basic
-LEN(string$)                    ' Length of string
-LEFT$(string$, n)               ' Leftmost n characters
-RIGHT$(string$, n)              ' Rightmost n characters
-MID$(string$, start[, length])  ' Substring (1-based indexing)
-```
+- **`SET(X,Y)`** / **`RESET(X,Y)`** — turn pixel on/off.
+- **`POINT(X,Y)`** — read pixel.
 
-### Conversion Functions
-```basic
-STR$(number)                    ' Convert number to string
-VAL(string$)                    ' Convert string to number
-CHR$(ascii_code)                ' ASCII code to character
-ASC(string$)                    ' First character to ASCII code
-```
+Manuals often use **1-based** **`X` (1–128)** and **`Y` (1–48)** for BASIC, while the hardware maps to **0–127** / **0–47** internally.
 
-### String Utilities
-```basic
-STRING$(count, character)       ' Repeat character count times
-INSTR([start,] string$, find$)  ' Find substring position (1-based)
-```
+**Interpreter:** BASIC **`SET`/`RESET`/`POINT`** use **1-based** coordinates; internal storage is **0-based** (**`get_pixel(x-1,y-1)`** style).
 
-## System Functions
+---
 
-### Memory Access
-```basic
-PEEK(address)                   ' Read memory byte
-POKE address, value             ' Write memory byte
-```
+## Memory, PEEK/POKE, cassette
 
-### Keyboard Input
-```basic
-INKEY$                          ' Get key press (non-blocking)
-```
-- Returns empty string if no key pressed
-- Returns single character if key available
+### Important Model I addresses (typical)
 
-### Graphics Query
-```basic
-POINT(x, y)                     ' Check pixel state (0 or 1)
-```
-- Returns 1 if pixel is on, 0 if off
-- Coordinates are 1-based (1,1 to 128,48)
+| Address / range | Role |
+|-----------------|------|
+| **15360–16383** | **Screen** character buffer (**1024** bytes = **64×16**) |
+| **14400** | Often used in **BASIC programs** as a **keyboard** / input cell in published listings |
 
-## Graphics Commands
+**Interpreter:** **`PEEK`** for **15360–16383** returns the **character code** at that cell. **`PEEK(14400)`** does **not** emulate Z80/keyboard hardware bit-for-bit; it exposes a **simplified** “last key” style value for game ports.
 
-### Pixel Control
-```basic
-SET(x, y)                       ' Turn pixel on
-RESET(x, y)                     ' Turn pixel off
-```
-- Coordinates: x=1 to 128, y=1 to 48
-- (1,1) is top-left corner
+### Cassette
 
-## Memory and I/O
+Original: **`PRINT#-1,…`** / **`INPUT#-1,…`** (device **−1**) talk to **cassette** through the ROM’s I/O.
 
-### Tape Operations
-```basic
-PRINT#-1, expression            ' Write to tape file
-INPUT#-1, variable              ' Read from tape file
-```
+**Interpreter:** Same syntax maps to an **in-memory tape buffer**, not real audio I/O.
 
-### Memory Locations
-- **14400**: Keyboard input buffer
-- **15360-16383**: Screen memory (64×16 characters)
+---
 
-## Operators
+## Limitations (Level II)
 
-### Arithmetic
-```basic
-+               ' Addition
--               ' Subtraction  
-*               ' Multiplication
-/               ' Division
-^               ' Exponentiation
-MOD             ' Modulo (remainder)
-```
+- **Variable names** — effectively **two significant characters**: one letter, then optional letter or digit, then type suffix **`$` `%` `!` `#`** as applicable.
+- **Arrays** — one dimension; **`DIM`** defines size (**0…N** inclusive when **`DIM A(N)`**).
+- **No multi-line `DEF FN`** on stock Level II.
+- **No structured `PROC`/`SUB`** — use **`GOSUB`**.
 
-### Comparison
-```basic
-=               ' Equal
-<>              ' Not equal
-<               ' Less than
->               ' Greater than
-<=              ' Less than or equal
->=              ' Greater than or equal
-```
+**Interpreter:** Same naming rules are enforced in practice by the parser; long names like **`NAME$`** are **not** separate variables on real Level II either.
 
-### Logical
-```basic
-AND             ' Logical AND
-OR              ' Logical OR
-NOT             ' Logical NOT
-```
+---
 
-### String
-```basic
-+               ' String concatenation
-```
+## Syntax and style
 
-## Syntax Rules
+1. **Line numbers** on **program** lines; **immediate** statements without numbers at **`READY`**.
+2. **Strings** in **double quotes** (standard listings).
+3. **`REM`** through end of line.
+4. **Multiple statements** — **`:`** separator (watch **`IF`** interactions).
 
-### General Rules
-1. **Line Numbers**: Required for all executable statements
-2. **Keywords**: Automatically converted to uppercase
-3. **Multiple Statements**: Separate with colon (:)
-4. **String Literals**: Enclosed in double quotes
-5. **Comments**: Use REM keyword
-6. **Variable Names**: Single letter or letter+digit only
+---
 
-### PRINT Statement Rules
-```basic
-PRINT "TEXT"                    ' Print with newline
-PRINT "TEXT";                   ' Print without newline
-PRINT A; B; C                   ' Print with no spaces
-PRINT A, B, C                   ' Print in tab columns
-PRINT A; "TEXT"; B              ' Mixed expressions
-```
+## Memory map (Model I)
 
-### Variable Assignment
-```basic
-LET A = 5                       ' Explicit assignment
-A = 5                           ' Implicit assignment (LET optional)
-```
+Text screen formula (hardware / BASIC **`PRINT@`**):
 
-### Array Usage
-```basic
-DIM A(10)                       ' Must dimension before use
-A(0) = 5                        ' Valid index: 0 to 10
-A(11) = 5                       ' Error: out of bounds
-```
+**`address = 15360 + row × 64 + col`**, **`row`** **0–15**, **`col`** **0–63**.
 
-## Memory Map
-
-### Important Addresses
-| Address | Purpose |
-|---------|---------|
-| 14400 | Keyboard input buffer |
-| 15360-15423 | Screen row 0 (columns 0-63) |
-| 15424-15487 | Screen row 1 (columns 0-63) |
-| ... | ... |
-| 16320-16383 | Screen row 15 (columns 0-63) |
-
-### Screen Memory Layout
-- Each character position = 15360 + (row * 64) + column
-- Row 0-15, Column 0-63
-- ASCII values stored directly
+---
 
 ## Examples
 
-### Basic Program Structure
-```basic
-10 REM HELLO WORLD PROGRAM
-20 CLS
-30 PRINT "HELLO, WORLD!"
-40 END
-```
+### Hello (portable)
 
-### Input and Variables
 ```basic
 10 CLS
-20 PRINT "ENTER YOUR NAME: ";
-30 INPUT N$
-40 PRINT "HELLO, "; N$; "!"
-50 END
-```
-
-### Loops and Arrays
-```basic
-10 DIM A(10)
-20 FOR I = 1 TO 10
-30 A(I) = I * 2
-40 NEXT I
-50 FOR I = 1 TO 10
-60 PRINT A(I);
-70 NEXT I
-80 END
-```
-
-### Graphics Example
-```basic
-10 CLS
-20 FOR X = 1 TO 128
-30 FOR Y = 1 TO 48
-40 IF X MOD 8 = 0 THEN SET(X, Y)
-50 NEXT Y
-60 NEXT X
-70 END
-```
-
-### Subroutines
-```basic
-10 GOSUB 1000
-20 PRINT "BACK FROM SUBROUTINE"
+20 PRINT "HELLO"
 30 END
-1000 PRINT "IN SUBROUTINE"
-1010 RETURN
 ```
 
-### String Manipulation
+### `DEF FN`
+
 ```basic
-10 A$ = "HELLO"
-20 B$ = "WORLD"
-30 C$ = A$ + " " + B$
-40 PRINT C$
-50 PRINT "LENGTH: "; LEN(C$)
-60 PRINT "FIRST 5: "; LEFT$(C$, 5)
-70 END
+10 DEF FNC(X)=X*2+1
+20 PRINT FNC(5)
+30 END
 ```
 
-### Game Loop Example
+### Graphics (1-based coordinates)
+
 ```basic
-10 REM SIMPLE GAME LOOP
-20 CLS
-30 LET S = 64                   ' Player position
-40 LET K = PEEK(14400)          ' Check keyboard
-50 IF K = 65 THEN S = S - 1     ' A key = move left
-60 IF K = 83 THEN S = S + 1     ' S key = move right
-70 POKE 15360 + S, 42           ' Draw player (*)
-80 GOTO 40                      ' Game loop
+10 CLS
+20 SET(64,24)
+30 END
 ```
 
-This reference covers the complete TRS-80 Model I Level II BASIC language as implemented in this simulator. All examples are tested and verified to work correctly. 
+---
+
+## Maintaining this file
+
+- **Hardware** sections should follow **Tandy/Radio Shack Model I Level II BASIC** manuals.
+- **`Interpreter:`** sections should be updated when **`TRS80_March_31_26.py`** (or web `index.html`) changes.
+
+If a statement in this file conflicts with **measured behavior on a real Model I**, **trust the machine** and adjust the **Interpreter** notes — not the other way around.
