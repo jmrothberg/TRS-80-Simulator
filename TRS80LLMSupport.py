@@ -1,6 +1,8 @@
 # jonathanrothberg@gmail.com HELPER FUNCTIONS FOR TRS80 LLM SUPPORT
 # AUGUST 24, 2024
 # Updated to use Ollama instead of llama-cpp-python
+# Apr 13 2026 - torch/transformers lazy-imported; TRANSFORMERS_AVAILABLE
+#              replaced with runtime import probe in create_llm_window()
 # Install Ollama: https://ollama.ai/
 # pip install requests
 
@@ -100,8 +102,14 @@ class TRS80LLMSupport:
         # Use smaller radio buttons with abbreviated text
         claude_rb = ttk.Radiobutton(self.control_frame, text="C", variable=self.model_type_var, value="claude", command=self.update_model_options)
         claude_rb.pack(side=tk.LEFT, padx=1)
-        trans_rb = ttk.Radiobutton(self.control_frame, text="T", variable=self.model_type_var, value="transformer", command=self.update_model_options)
-        trans_rb.pack(side=tk.LEFT, padx=1)
+        try:
+            import transformers as _tf  # noqa: F401 — probe only
+            _has_transformers = True
+        except ImportError:
+            _has_transformers = False
+        if _has_transformers:
+            trans_rb = ttk.Radiobutton(self.control_frame, text="T", variable=self.model_type_var, value="transformer", command=self.update_model_options)
+            trans_rb.pack(side=tk.LEFT, padx=1)
         ollama_rb = ttk.Radiobutton(self.control_frame, text="O", variable=self.model_type_var, value="ollama", command=self.update_model_options)
         ollama_rb.pack(side=tk.LEFT, padx=1)
 

@@ -16,7 +16,7 @@ The flagship demo is **SCOTTADV.BAS**, a ~580-line BASIC program that plays all 
 
 | Version | Location | How to run |
 |---------|----------|------------|
-| **Python (desktop)** | `TRS80_March_31_26.py` | `pip install -r requirements.txt && python TRS80_March_30_26.py` |
+| **Python (desktop)** | `TRS80_April_13_26.py` | `pip install -r requirements.txt && python TRS80_April_13_26.py` |
 | **JavaScript (browser)** | `web_TRS_80/index.html` | Open in any browser — no server needed |
 | **Live online demo** | `docs/index.html` | **[jmrothberg.github.io/TRS-80-Simulator](https://jmrothberg.github.io/TRS-80-Simulator/)** |
 
@@ -81,7 +81,7 @@ The crown jewel of this project: a complete Scott Adams adventure engine written
 3. Click **RUN** → press Enter when prompted → the adventure loads!
 
 **Python version:**
-1. Launch `python TRS80_March_30_26.py`
+1. Launch `python TRS80_April_13_26.py`
 2. Type `LOAD` on the green screen → select `SCOTTADV.BAS`
 3. Type `RUN` → press Enter → select the `.dat` file when the dialog appears
 
@@ -136,7 +136,7 @@ The interpreter reads the standard ScottFree ASCII `.dat` format. Additional `.d
 
 | File / Folder | Purpose |
 |---------------|---------|
-| `TRS80_March_30_26.py` | **Python simulator** — interpreter, Tkinter UI, screen, debugger (~4,100 lines) |
+| `TRS80_April_13_26.py` | **Python simulator** — interpreter, Tkinter UI, screen, debugger (~4,300 lines) |
 | `web_TRS_80/` | **JavaScript simulator** — same BASIC interpreter in the browser (`index.html`) |
 | `docs/` | Copy of `web_TRS_80/index.html` for **[GitHub Pages](https://jmrothberg.github.io/TRS-80-Simulator/)** |
 | `Scott_Adams_Basic_version/` | **SCOTTADV.BAS** adventure interpreter + 18 `.dat` game data files |
@@ -179,7 +179,7 @@ The simulator targets TRS-80 Model I Level II BASIC:
 - `PRINT@` uses screen positions (0-1023).
 - `RND`, `RND(0)`, `RND(1)` all return a new random float 0.0–0.9999 (for probability checks). `RND(n)` where n>1 returns a random integer 1–n (for coordinates/dice).
 - Comparisons return `-1` (true) or `0` (false).
-- `AND`, `OR`, `NOT` work as logical operators on -1/0 values.
+- `AND`, `OR` are **bitwise** operators (matching real TRS-80 hardware). `NOT` is bitwise complement.
 - `STR$(n)` includes a leading space for the sign placeholder.
 - `PEEK(14400)` polls the keyboard buffer (primary method for game input).
 - Multiple statements per line: `10 A=1: B=2: PRINT A+B`
@@ -282,7 +282,7 @@ pyinstaller --onefile --console \
     --exclude-module tqdm --exclude-module sympy \
     --exclude-module PIL --exclude-module cv2 \
     --name TRS80 \
-    TRS80_March_30_26.py
+    TRS80_April_13_26.py
 ```
 
 **macOS Gatekeeper fix** — required after every build:

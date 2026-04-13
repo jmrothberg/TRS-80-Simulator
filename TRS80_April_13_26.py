@@ -24,6 +24,19 @@
 #                  web_TRS_80 perf: fewer flushes, no line-stride idletasks cap)
 #    Mar 31 2026 - Tk canvas: tag_raise text layer after gfx flush so RESET
 #                  pixels do not cover glyphs (matches web two-layer behavior)
+#    Apr 13 2026 - Ported 8 interpreter fixes from web version:
+#                  AND/OR now bitwise (_iand/_ior) matching TRS-80 semantics,
+#                  negative variable values wrapped in parens during substitution,
+#                  PRINT TAB() emits actual spaces, DEF FN uses try/finally for
+#                  param restore + wraps negative results in parens, PRINT@
+#                  early return on malformed commands, SET/RESET uses rindex(')')
+#                  + _split_top_level_comma for nested-paren coords, CLEAR resets
+#                  _last_rnd, _uses_inkey also checks PEEK(14400)
+#    Apr 13 2026 - TAPE button added to GUI for pre-loading .dat files before RUN
+#    Apr 13 2026 - Backspace fix: tag-based text clearing instead of black
+#                  rectangles that permanently occluded new text on the Canvas
+#    Apr 13 2026 - Pi startup fix: self.master.update_idletasks() (TRS80Simulator
+#                  is not a Tk widget, so self.update_idletasks() crashed)
 #
 # ---------------------------------------------------------------------------
 #  HOW THE INTERPRETER WORKS  (read this before diving into the code)
@@ -133,7 +146,7 @@ class TRS80Simulator:
     # ============================================================
     def __init__(self, master):
         self.master = master
-        master.title("JMR's TRS-80 Simulator v1.7")
+        master.title("JMR's TRS-80 Simulator v1.8")
 
         # Detect if running on Raspberry Pi to disable 2x scaling
         self.is_raspberry_pi = self.detect_raspberry_pi()
@@ -209,6 +222,9 @@ class TRS80Simulator:
 
         self.load_button = tk.Button(button_frame, text="LOAD", command=self.load_program, font=("Arial", 8), width=4, height=1)
         self.load_button.pack(side=tk.LEFT, padx=1)
+
+        self.tape_button = tk.Button(button_frame, text="TAPE", command=self.load_tape_file, font=("Arial", 8), width=4, height=1)
+        self.tape_button.pack(side=tk.LEFT, padx=1)
 
         # Add Copy Screen button
         self.copy_screen_button = tk.Button(button_frame, text="Copy", command=self.copy_screen, font=("Arial", 8), width=4, height=1)
@@ -353,6 +369,8 @@ class TRS80Simulator:
             "_eq": lambda a, b: -1 if a == b else 0,
             "_ne": lambda a, b: -1 if a != b else 0,
             "_bnot": lambda a: ~int(a),
+            "_iand": lambda a, b: int(a) & int(b),
+            "_ior":  lambda a, b: int(a) | int(b),
         }
 
         # Add button to open LLM support window
@@ -1129,6 +1147,7 @@ class TRS80Simulator:
         self.array_variables = {}
         self.array_dimensions = {}
         self.user_functions = {}
+        self._last_rnd = 0
         self.for_loops = {}
         self.gosub_stack = []
         self.data_pointer = 0
@@ -1352,10 +1371,12 @@ class TRS80Simulator:
                     self.cursor_row -= 1
                     self.cursor_col = 63
 
-                x = self.cursor_col * self._char_w
-                y = self.cursor_row * self._char_h
-                self.screen.create_rectangle(x, y, x + self._char_w, y + self._char_h,
-                    fill="black", outline="black")
+                # Clear the character by updating its text to a space
+                # (drawing a rectangle would occlude any text drawn later)
+                tag = f"c{self.cursor_row}_{self.cursor_col}"
+                old = self.screen.find_withtag(tag)
+                if old:
+                    self.screen.itemconfigure(old[0], text=' ')
 
                 # Update the screen content and input buffer
                 self.screen_content[self.cursor_row][self.cursor_col] = ' '
@@ -1621,7 +1642,7 @@ class TRS80Simulator:
         # If the program uses INKEY$ or PEEK(14400) for keyboard polling,
         # we must process Tkinter events every iteration so key presses
         # are picked up promptly.  Otherwise we can skip most updates.
-        self._uses_inkey = any('INKEY$' in line for line in self.sorted_program)
+        self._uses_inkey = any('INKEY$' in line or 'PEEK(14400)' in line for line in self.sorted_program)
         # Pre-scan all DATA statements before execution (TRS-80 behavior)
         self._prescan_data()
         self.program_running = True
@@ -2339,6 +2360,8 @@ class TRS80Simulator:
                 self.cursor_col = position % 64
                 if self.debug_mode:
                     self.debug_print(f"PRINT@ {position + 1} -> row {self.cursor_row}, col {self.cursor_col}")
+            else:
+                return  # Malformed PRINT@ — bail out
         else:
             content = command[5:].strip()
 
@@ -2360,6 +2383,8 @@ class TRS80Simulator:
                     match = self._regex_cache['tab'].search(part)
                     if match:
                         tab_pos = int(match.group(1))
+                        spaces_needed = max(0, tab_pos - cursor_pos)
+                        output += ' ' * spaces_needed
                         cursor_pos = tab_pos
                 else:
                     evaluated_part = self.evaluate_expression(part.strip())
@@ -2437,10 +2462,10 @@ class TRS80Simulator:
             if '(' in command and ')' in command:
                 cmd_type = 'SET' if command.startswith('SET') else 'RESET'
                 paren_start = command.index('(')
-                paren_end = command.index(')')
+                paren_end = command.rindex(')')  # last ')' — handles nested parens
                 coords = command[paren_start+1:paren_end]
-                if ',' in coords:
-                    x_str, y_str = coords.split(',', 1)
+                x_str, y_str = self._split_top_level_comma(coords)
+                if y_str is not None:
                     x = int(self.evaluate_expression(x_str.strip())) - 1
                     y = int(self.evaluate_expression(y_str.strip())) - 1
                     if cmd_type == 'SET':
@@ -3004,6 +3029,8 @@ class TRS80Simulator:
                 expr = expr[:left_start] + f"{func_name}({left},{right})" + expr[right_end:]
         # 2. Replace 'not' with _bnot() for bitwise NOT
         expr = self._wrap_not_ops(expr)
+        # 3. Replace AND/OR with bitwise _iand/_ior (AND first — higher precedence)
+        expr = self._wrap_and_or_ops(expr)
         return expr
 
     def _find_comp_op(self, expr, op_str):
@@ -3141,6 +3168,22 @@ class TRS80Simulator:
             expr = expr[:pos] + f"_bnot({operand})" + expr[j:]
         return expr
 
+    def _wrap_and_or_ops(self, expr):
+        """Transform 'X and Y' -> '_iand(X,Y)' and 'X or Y' -> '_ior(X,Y)'
+        for TRS-80 bitwise AND/OR semantics.  AND is processed first
+        (higher precedence than OR)."""
+        for keyword, func_name in [(' and ', '_iand'), (' or ', '_ior')]:
+            while True:
+                pos = self._find_comp_op(expr, keyword)
+                if pos == -1:
+                    break
+                left_start = self._scan_left_boundary(expr, pos)
+                right_end = self._scan_right_boundary(expr, pos + len(keyword))
+                left = expr[left_start:pos].strip()
+                right = expr[pos + len(keyword):right_end].strip()
+                expr = expr[:left_start] + f"{func_name}({left},{right})" + expr[right_end:]
+        return expr
+
     def _eval_nested(self, expr):
         """Full expression evaluation pipeline.
 
@@ -3240,16 +3283,22 @@ class TRS80Simulator:
                             break
                 arg_expr = expr[start_idx:end_idx]
                 arg_val = self._eval_nested(arg_expr)
-                # Save, set, evaluate, restore parameter
+                # Save, set, evaluate, restore parameter (try/finally for safety)
                 param = defn['param']
                 saved = self.scalar_variables.get(param)
+                had_param = param in self.scalar_variables
                 self.scalar_variables[param] = arg_val
-                result = self._eval_nested(defn['body'])
-                if saved is not None:
-                    self.scalar_variables[param] = saved
-                elif param in self.scalar_variables:
-                    del self.scalar_variables[param]
-                expr = expr[:fn_match.start()] + str(result) + expr[end_idx + 1:]
+                try:
+                    result = self._eval_nested(defn['body'])
+                finally:
+                    if had_param:
+                        self.scalar_variables[param] = saved
+                    elif param in self.scalar_variables:
+                        del self.scalar_variables[param]
+                # Wrap negative results in parens so -3**2 isn't mis-parsed
+                sv = str(result)
+                replacement = f"({sv})" if isinstance(result, (int, float)) and result < 0 else sv
+                expr = expr[:fn_match.start()] + replacement + expr[end_idx + 1:]
                 quote_map = self._build_quote_map(expr)
 
         # --- Stage 5: Array reference substitution ---
@@ -3349,6 +3398,8 @@ class TRS80Simulator:
                                     replacement = replacement[:-1]
                             else:
                                 replacement = str(value)
+                                if isinstance(value, (int, float)) and value < 0:
+                                    replacement = f"({replacement})"
                             new_parts.append(replacement)
                         else:
                             new_parts.append(parts[i][last_end:e])
@@ -3696,6 +3747,19 @@ class TRS80Simulator:
             self.tape_file = "default_tape.dat"
         self.debug_print(f"Selected tape file: {self.tape_file}")
 
+    def load_tape_file(self):
+        """GUI button handler: select a .dat tape file and reset the read pointer."""
+        self.debug_print("Loading tape file via button")
+        self.tape_file = filedialog.askopenfilename(
+            title="Load Tape File",
+            filetypes=[("DAT files", "*.dat"), ("All files", "*.*")]
+        )
+        if self.tape_file:
+            self.tape_pointer = 0
+            self.debug_print(f"Tape loaded: {self.tape_file}  (pointer reset to 0)")
+        else:
+            self.debug_print("Tape load cancelled")
+
     def read_from_tape(self):
         """Read a line from the tape file."""
         if not os.path.exists(self.tape_file):
@@ -3837,7 +3901,7 @@ class TRS80Simulator:
     def _apply_initial_code_pane_sash(self):
         """Set vertical sash so BASIC pane starts ~4 lines tall (old default), not maximized in the PanedWindow."""
         try:
-            self.update_idletasks()
+            self.master.update_idletasks()
             pw_h = self.main_pane.winfo_height()
             if pw_h <= 1:
                 self.master.after(10, self._apply_initial_code_pane_sash)

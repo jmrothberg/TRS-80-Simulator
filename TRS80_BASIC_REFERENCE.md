@@ -25,7 +25,7 @@ This guide describes **Radio Shack TRS-80 Model I Level II BASIC** as it was doc
 ## How to use this document
 
 - **Default text** = **Model I Level II on real hardware** (manuals / common reference material).
-- **`Interpreter:`** = **only** applies to **this simulator** (`TRS80_March_31_26.py`, `web_TRS_80/index.html`, `docs/index.html`).
+- **`Interpreter:`** = **only** applies to **this simulator** (`TRS80_April_13_26.py`, `web_TRS_80/index.html`, `docs/index.html`).
 
 When behavior is unknown or ROM-dependent, that is stated.
 
@@ -185,7 +185,7 @@ Level II allows **single-line** definitions:
 
 Only **`FN` + one letter** and a simple parameter list appear in classic manuals.
 
-**Interpreter:** **`DEF FNx(...)=...`** is parsed into a table; **`FNx(...)`** is expanded during evaluation. Match **`TRS80_March_31_26.py`** for exact regex (parameter naming).
+**Interpreter:** **`DEF FNx(...)=...`** is parsed into a table; **`FNx(...)`** is expanded during evaluation. Match **`TRS80_April_13_26.py`** for exact regex (parameter naming).
 
 ---
 
@@ -278,6 +278,6 @@ Text screen formula (hardware / BASIC **`PRINT@`**):
 ## Maintaining this file
 
 - **Hardware** sections should follow **Tandy/Radio Shack Model I Level II BASIC** manuals.
-- **`Interpreter:`** sections should be updated when **`TRS80_March_31_26.py`** (or web `index.html`) changes.
+- **`Interpreter:`** sections should be updated when **`TRS80_April_13_26.py`** (or web `index.html`) changes.
 
 If a statement in this file conflicts with **measured behavior on a real Model I**, **trust the machine** and adjust the **Interpreter** notes — not the other way around.
