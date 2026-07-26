@@ -1,0 +1,12 @@
+10 REM day of week for the 1st of each month of 1980 (0=saturday)
+20 Y=1980
+30 FOR M=1 TO 12
+40 MM=M:YY=Y
+50 IF MM>2 THEN 80
+60 MM=MM+12:YY=YY-1
+80 K=YY-100*(YY/100):J=YY/100
+90 H=1+(13*(MM+1))/5+K+K/4+J/4+5*J
+100 H=H-7*(H/7)
+110 PRINT H;
+120 NEXT M
+130 PRINT
