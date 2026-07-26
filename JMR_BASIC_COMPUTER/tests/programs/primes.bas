@@ -1,0 +1,10 @@
+10 REM primes below 50 by trial division
+20 FOR N=2 TO 49
+30 P=1
+40 FOR D=2 TO N-1
+50 IF N-D*(N/D)=0 THEN P=0
+60 NEXT D
+70 IF P=1 THEN PRINT N;
+80 NEXT N
+90 PRINT
+100 PRINT "DONE"
