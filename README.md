@@ -158,19 +158,22 @@ The interpreter reads the standard ScottFree ASCII `.dat` format. Additional `.d
 
 ## Example Programs
 
-The `Basic_Code_Examples/` directory contains:
+The `Basic_Code_Examples/` directory contains sample games and tests. These were updated for the Level II **0-based** screen/graphics convention (`PRINT@` 0–1023, `SET`/`RESET`/`POINT` X 0–127 / Y 0–47) used by the Python and web interpreters — including Invaders, Asteroids, Snake, Breakout, Midway, Falling Star, Startrek (`RND(0)`), and the print/screen test programs.
 
 | File | Description |
 |------|-------------|
 | `Invaders_V.bas` / `Invaders_VI.bas` | Space Invaders variants |
 | `asteroid.bas` | Space shooter |
-| `Snake.bas` | Snake game |
+| `Snake.bas` / `snake_simple.bas` | Snake games |
 | `breakout_II.bas` | Breakout clone |
+| `Falling_star.bas` | Catch falling stars (`PRINT@`) |
+| `STARTREK.bas` | Star Trek — uses Level II `RND(0)` for fractions |
 | `Hi_Low.bas` | Number guessing game |
 | `hangman.bas` | Hangman word game |
 | `hamurabi.bas` | *Hamurabi* (David Ahl, *BASIC Computer Games*, 1978); ancient Sumer grain/land simulation — uses `RND(0)` for Level II |
 | `Midway_Campaign_TRS80.bas` | *Midway Campaign* (Battle of Midway): `PRINT@` map, T/A/L/CA/CL, help; listed in the web **Examples** menu (GitHub raw) |
 | `Midway_Campaign_Atari8_LISTING.txt` | ASCII listing of *Midway Campaign* detokenized from **Atari BASIC** (see note below — not for this TRS-80 simulator) |
+| `Test_Print.bas` / `screentest.bas` | `PRINT@` and `SET` screen tests |
 | `complex_test_suite.bas` | Comprehensive BASIC feature tests |
 
 Run with: click **LOAD** (or type `LOAD` on the green screen), select a `.bas` file, then click **RUN**.
@@ -184,8 +187,11 @@ Run with: click **LOAD** (or type `LOAD` on the green screen), select a `.bas` f
 The simulator targets TRS-80 Model I Level II BASIC:
 
 - Every program line needs a line number. Keywords must be uppercase.
-- `PRINT@` uses screen positions (0-1023).
-- `RND`, `RND(0)`, `RND(1)` all return a new random float 0.0–0.9999 (for probability checks). `RND(n)` where n>1 returns a random integer 1–n (for coordinates/dice).
+- **Screen coordinates match the 1978 Level II manual** (Python and web interpreters):
+  - `PRINT@` uses positions **0–1023** (upper-left = **0**, not 1).
+  - `SET` / `RESET` / `POINT` use **X = 0–127**, **Y = 0–47** (upper-left = **(0,0)**).
+  - Matching updates are in the example `.bas` programs under `Basic_Code_Examples/` (games + screen tests).
+- `RND(0)` returns a new random float 0.0–0.9999. `RND(n)` for **n ≥ 1** returns a random integer **1–n** (`RND(1)` is always `1`). Negative `n` is `?FC`. (Ports from Microsoft 8K BASIC that used `RND(1)` for a fraction should use `RND(0)` instead.)
 - Comparisons return `-1` (true) or `0` (false).
 - `AND`, `OR` are **bitwise** operators (matching real TRS-80 hardware). `NOT` is bitwise complement.
 - `STR$(n)` includes a leading space for the sign placeholder.

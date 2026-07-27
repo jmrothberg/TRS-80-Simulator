@@ -200,7 +200,8 @@ The simulator supports hardware-accelerated AI models using the Hailo-10H AI acc
 
 ### Screen Memory
 - Text screen: 15360-16383 (64×16 characters)
-- Graphics: 128×48 pixels via SET/RESET commands
+- Graphics: 128×48 pixels via `SET`/`RESET`/`POINT` — Level II coords **X 0–127**, **Y 0–47** (upper-left `(0,0)`)
+- `PRINT@` positions **0–1023** (upper-left = 0)
 - Keyboard buffer: Address 14400
 
 ### Variable Limitations

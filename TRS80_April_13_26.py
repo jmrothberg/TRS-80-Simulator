@@ -37,6 +37,9 @@
 #                  rectangles that permanently occluded new text on the Canvas
 #    Apr 13 2026 - Pi startup fix: self.master.update_idletasks() (TRS80Simulator
 #                  is not a Tk widget, so self.update_idletasks() crashed)
+#    Jul 26 2026 - Level II RND (RND(0)=float, RND(n)=1..n; RND(1) is 1),
+#                  PRINT TAB(expr) with nested parens + trailing item (STARTREK),
+#                  PRINT@/SET/RESET/POINT already 0-based (upper-left 0 / (0,0))
 #
 # ---------------------------------------------------------------------------
 #  HOW THE INTERPRETER WORKS  (read this before diving into the code)
@@ -2379,14 +2382,34 @@ class TRS80Simulator:
                 start = end + 1
 
             if part:
-                if 'TAB(' in part:
-                    match = self._regex_cache['tab'].search(part)
-                    if match:
-                        tab_pos = int(match.group(1))
+                # TAB takes any expression, not just a literal number: STARTREK
+                # centres its galaxy map with PRINT TAB(J0);G2$. Count parens to
+                # find the close, so TAB(INT(15-.5*LEN(G2$))) works too. Whatever
+                # follows the ")" is a normal item, as in PRINT TAB(10)"X".
+                # (Mirrors web_TRS_80/index.html _cmdPrint TAB handling.)
+                tab_at = part.find('TAB(')
+                if tab_at != -1 and not part[:tab_at].strip():
+                    depth = 1
+                    arg_end = -1
+                    for ci in range(tab_at + 4, len(part)):
+                        if part[ci] == '(':
+                            depth += 1
+                        elif part[ci] == ')':
+                            depth -= 1
+                            if depth == 0:
+                                arg_end = ci
+                                break
+                    if arg_end != -1:
+                        arg = part[tab_at + 4:arg_end]
+                        try:
+                            tab_pos = int(float(self.evaluate_expression(arg)))
+                        except (ValueError, TypeError):
+                            tab_pos = 0
                         spaces_needed = max(0, tab_pos - cursor_pos)
                         output += ' ' * spaces_needed
                         cursor_pos = tab_pos
-                else:
+                        part = part[arg_end + 1:]
+                if part.strip():
                     evaluated_part = self.evaluate_expression(part.strip())
                     formatted = self._format_number(evaluated_part)
                     output += formatted
@@ -3473,16 +3496,22 @@ class TRS80Simulator:
         }
 
     def _func_rnd(self, inner_value, inner_expr):
-        """RND(n): TRS-80 / Atari-ported BASIC convention used in this project.
-        RND(0)  -> new random float 0.0..0.9999 (Midway uses RND(0) as primary RNG)
-        RND(1)  -> new random float 0.0..0.9999 (STARTREK probabilities)
-        RND(n>1)-> new random INTEGER 1..n       (Snake coordinates)
+        """Level II (manual page 48): RND(0) -> float 0.0..0.9999, RND(n) -> integer
+        1..n.  RND(1) is therefore the constant 1, NOT a float.  Microsoft 8K
+        BASIC returns a float for any positive argument, so a program ported from
+        it must have its RND(1) rewritten as RND(0) -- see the REM at the top of
+        hamurabi.bas and STARTREK.bas.
+        Mirrors web_TRS_80/index.html _funcRnd.
         """
-        n = float(inner_value)
-        if int(n) <= 1:
+        # "RND uses the INTeger value of the argument"
+        n = int(float(inner_value))
+        if n == 0:
             result = random.random()
+        elif n < 0:
+            self._error_fc(f"RND({n}) — argument must be positive")
+            result = 0
         else:
-            result = random.randint(1, int(n))
+            result = random.randint(1, n)
         self._last_rnd = result
         return result
 
@@ -4221,9 +4250,9 @@ Mathematical Functions:
 - SIN(x), COS(x), TAN(x): Trig functions (radians)
 - EXP(x): e^x
 - LOG(x): Natural logarithm
-- RND: Random 0.0 to 0.999999
-- RND(n): Random integer 1 to n
-- RND(0): New random float
+- RND(0): Random float 0.0 to 0.9999 (Level II)
+- RND(n) n>=1: Random integer 1 to n (RND(1) is always 1)
+- RND: Random float 0.0 to 0.9999 (extension; Level II needs an argument)
 
 String Functions:
 - LEN(string$): Length of string
@@ -4250,7 +4279,7 @@ Graphics & Screen:
 - SET(x, y): Turn on pixel (x:0-127, y:0-47)
 - RESET(x, y): Turn off pixel
 - POINT(x, y): Check pixel (returns 0 or 1)
-- TAB(n): Move to column n in PRINT
+- TAB(n) / TAB(expr): Move to column n in PRINT (expression + trailing text OK)
 
 Memory Functions:
 - PEEK(address): Read memory byte
