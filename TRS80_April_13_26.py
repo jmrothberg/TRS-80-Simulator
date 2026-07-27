@@ -131,7 +131,7 @@ _GRAPHICS_PENDING_BATCH = 256
 # pulling in torch/transformers at startup (faster launch, smaller binary).
 TRS80LLMSupport = None
 PIXEL_SIZE = 6  # Reduced from 6 to 4 for smaller screen
-INITIAL_WIDTH = 768  # 128 pixels * 6 = 774 to accommodate coordinates 1-128
+INITIAL_WIDTH = 768  # 128 pixels * 6 (Level II graphics x: 0-127)
 INITIAL_HEIGHT = 288  # Reduced from 288 to 192 for 7" screen
 
 class TRS80Simulator:
@@ -2354,12 +2354,12 @@ class TRS80Simulator:
             match = self._regex_cache['print_at'].match(command)
             if match:
                 position_expr, content = match.groups()
+                # Level II BASIC: PRINT@ uses 0..1023 (manual: upper-left=0).
                 position = int(self.evaluate_expression(position_expr))
-                position -= 1
                 self.cursor_row = position // 64
                 self.cursor_col = position % 64
                 if self.debug_mode:
-                    self.debug_print(f"PRINT@ {position + 1} -> row {self.cursor_row}, col {self.cursor_col}")
+                    self.debug_print(f"PRINT@ {position} -> row {self.cursor_row}, col {self.cursor_col}")
             else:
                 return  # Malformed PRINT@ — bail out
         else:
@@ -2466,8 +2466,9 @@ class TRS80Simulator:
                 coords = command[paren_start+1:paren_end]
                 x_str, y_str = self._split_top_level_comma(coords)
                 if y_str is not None:
-                    x = int(self.evaluate_expression(x_str.strip())) - 1
-                    y = int(self.evaluate_expression(y_str.strip())) - 1
+                    # Level II BASIC: SET/RESET use 0..127, 0..47 (manual: upper-left=(0,0)).
+                    x = int(self.evaluate_expression(x_str.strip()))
+                    y = int(self.evaluate_expression(y_str.strip()))
                     if cmd_type == 'SET':
                         self.set_pixel(x, y)
                     else:
@@ -2480,8 +2481,9 @@ class TRS80Simulator:
             match = self._regex_cache['set_reset'].match(command)
             if match:
                 cmd_type, x_expr, y_expr = match.groups()
-                x = int(self.evaluate_expression(x_expr)) - 1
-                y = int(self.evaluate_expression(y_expr)) - 1
+                # Level II BASIC: SET/RESET use 0..127, 0..47.
+                x = int(self.evaluate_expression(x_expr))
+                y = int(self.evaluate_expression(y_expr))
                 if cmd_type == 'SET':
                     self.set_pixel(x, y)
                 else:
@@ -3501,7 +3503,8 @@ class TRS80Simulator:
             if len(parts) < 2:
                 return 0
             x, y = map(lambda v: int(self._eval_nested(v.strip())), parts[:2])
-            return self.get_pixel(x - 1, y - 1)
+            # Level II BASIC: POINT uses 0..127, 0..47 (same as SET/RESET).
+            return self.get_pixel(x, y)
         except ValueError as e:
             self.debug_print(f"Error in POINT function: {str(e)}", 'error')
             return 0
@@ -4244,7 +4247,7 @@ Operators:
 
 help_text3 = """
 Graphics & Screen:
-- SET(x, y): Turn on pixel (x:1-128, y:1-48)
+- SET(x, y): Turn on pixel (x:0-127, y:0-47)
 - RESET(x, y): Turn off pixel
 - POINT(x, y): Check pixel (returns 0 or 1)
 - TAB(n): Move to column n in PRINT
@@ -4286,8 +4289,8 @@ Example Programs:
 
 2. Graphics Demo:
 10 CLS
-20 FOR X = 1 TO 128 STEP 4
-30 FOR Y = 1 TO 48 STEP 4
+20 FOR X = 0 TO 127 STEP 4
+30 FOR Y = 0 TO 47 STEP 4
 40 IF (X + Y) MOD 8 = 0 THEN SET(X,Y)
 50 NEXT Y: NEXT X
 60 END

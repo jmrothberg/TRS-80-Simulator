@@ -1,5 +1,5 @@
-10 FOR X = 1 TO 128
-20 FOR Y = 1 TO 48
+10 FOR X = 0 TO 127
+20 FOR Y = 0 TO 47
 30 SET (X, Y)
 40 NEXT Y
 50 NEXT X
@@ -7,5 +7,5 @@
 
 
 
-
+    10|
 

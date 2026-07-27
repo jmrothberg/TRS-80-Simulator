@@ -194,9 +194,9 @@ Only **`FN` + one letter** and a simple parameter list appear in classic manuals
 - **`SET(X,Y)`** / **`RESET(X,Y)`** — turn pixel on/off.
 - **`POINT(X,Y)`** — read pixel.
 
-Manuals often use **1-based** **`X` (1–128)** and **`Y` (1–48)** for BASIC, while the hardware maps to **0–127** / **0–47** internally.
+Level II BASIC uses **0-based** coordinates: **`X` (0–127)** and **`Y` (0–47)**. Upper-left is **`(0,0)`**; lower-right is **`(127,47)`**.
 
-**Interpreter:** BASIC **`SET`/`RESET`/`POINT`** use **1-based** coordinates; internal storage is **0-based** (**`get_pixel(x-1,y-1)`** style).
+**Interpreter:** Same as Level II — no 1-based offset.
 
 ---
 

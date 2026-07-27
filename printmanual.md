@@ -37,13 +37,12 @@ Row 15: pos 960 .. 1023
 
 ### Level II BASIC Position Convention
 
-Level II BASIC PRINT@ uses **1-based** positions (1–1024).
-The interpreter must subtract 1 to convert to 0-based row/col:
+Level II BASIC PRINT@ uses **0-based** positions (0–1023).
+Upper-left is **0**; lower-right is **1023**.
 
 ```
-internal_pos = PRINT@_position - 1
-row = internal_pos // 64
-col = internal_pos % 64
+row = position // 64
+col = position % 64
 ```
 
 ---
@@ -136,7 +135,7 @@ PRINT@ position, expression_list ,
 
 **PRINT@ is NOT a "poke."  It is: set cursor, then PRINT.**
 
-1. **Set cursor** to the target position: `row = (pos-1)//64`, `col = (pos-1)%64`
+1. **Set cursor** to the target position: `row = pos//64`, `col = pos%64` (Level II: pos 0–1023)
 2. **Execute a normal PRINT** of the expression_list from that cursor position.
 3. All normal PRINT rules apply — including newline at end (unless `;` or `,`).
 
@@ -234,7 +233,7 @@ INPUT "PROMPT";A$
 5. On Enter: cursor moves to col 0 of next row, execution resumes.
 
 **After PRINT@, INPUT's prompt appears where the cursor was left.**
-This is why `PRINT@ 961,"CMD...";` followed by `INPUT A$` shows the
+This is why `PRINT@ 960,"CMD...";` followed by `INPUT A$` shows the
 `? ` prompt right after "CMD..." on row 15.
 
 ---
@@ -245,8 +244,8 @@ This is why `PRINT@ 961,"CMD...";` followed by `INPUT A$` shows the
 
 ```basic
 10 CLS
-20 PRINT@ 65,"AAAAAAAAAA"
-30 PRINT@ 65,"BBBBB"
+20 PRINT@ 64,"AAAAAAAAAA"
+30 PRINT@ 64,"BBBBB"
 ```
 
 **Expected screen at row 1:**
@@ -255,8 +254,8 @@ BBBBBAAAAAnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
 ```
 (n = space, untouched)
 
-PRINT@ 65 writes "AAAAAAAAAA" at row 1 cols 0–9.
-PRINT@ 65 writes "BBBBB" at row 1 cols 0–4.
+PRINT@ 64 writes "AAAAAAAAAA" at row 1 cols 0–9.
+PRINT@ 64 writes "BBBBB" at row 1 cols 0–4.
 Cols 0–4 now contain "B".  Cols 5–9 still contain "A" (not cleared by
 the second PRINT@).  The second PRINT@ only writes 5 chars, so only
 5 cells are affected.
@@ -267,11 +266,11 @@ the second PRINT@).  The second PRINT@ only writes 5 chars, so only
 
 ```basic
 10 CLS
-20 PRINT@ 129,"HELLO"
+20 PRINT@ 128,"HELLO"
 30 PRINT "WORLD"
 ```
 
-Line 20: PRINT@ 129 → row 2, col 0.  Print "HELLO" at cols 0–4.
+Line 20: PRINT@ 128 → row 2, col 0.  Print "HELLO" at cols 0–4.
 No semicolon → newline → cursor at row 3, col 0.
 Line 30: PRINT "WORLD" at row 3, col 0.
 
@@ -285,11 +284,11 @@ Row 3: WORLD
 
 ```basic
 10 CLS
-20 PRINT@ 129,"HELLO";
+20 PRINT@ 128,"HELLO";
 30 PRINT "WORLD"
 ```
 
-Line 20: PRINT@ 129 → row 2, col 0.  Print "HELLO" at cols 0–4.
+Line 20: PRINT@ 128 → row 2, col 0.  Print "HELLO" at cols 0–4.
 Semicolon → cursor at row 2, col 5.
 Line 30: PRINT "WORLD" at row 2, col 5.  No semicolon → newline.
 
@@ -303,10 +302,10 @@ Row 2: HELLOWORLD
 ```basic
 10 CLS
 20 A$=STRING$(64,"*")
-30 PRINT@ 65,A$
+30 PRINT@ 64,A$
 ```
 
-PRINT@ 65 → row 1, col 0.  Print 64 "*" chars, filling cols 0–63.
+PRINT@ 64 → row 1, col 0.  Print 64 "*" chars, filling cols 0–63.
 After col 63, cursor_col = 64.  Then newline: cursor_row = 3, col = 0.
 
 Wait — the newline processes: cursor_col is 64, which triggers

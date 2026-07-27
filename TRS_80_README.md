@@ -130,8 +130,8 @@ You can also:
 ### Graphics Example
 ```basic
 10 CLS
-20 FOR X = 1 TO 128 STEP 4
-30 FOR Y = 1 TO 48 STEP 4
+20 FOR X = 0 TO 127 STEP 4
+30 FOR Y = 0 TO 47 STEP 4
 40 SET(X, Y)
 50 NEXT Y
 60 NEXT X

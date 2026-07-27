@@ -15,7 +15,7 @@
 210 FOR I = 1 TO 15
 220 LET R = INT((I-1)/ 5) 
 230 LET C = I MOD 5
-240 LET E(I) =  R * 1024 + (C * 24) + 1
+240 LET E(I) =  R * 1024 + (C * 24)
 250 NEXT I
 
 300 REM MAIN GAME LOOP

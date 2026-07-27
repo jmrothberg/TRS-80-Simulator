@@ -464,7 +464,7 @@ Immediate Mode (type on green screen):
 
 Program Statements:
   PRINT expr [;|,] expr ...
-  PRINT@ pos, expr    (position 1–1024, TRS-80 upper-left=1; engine uses pos-1)
+  PRINT@ pos, expr    (position 0–1023, Level II; upper-left=0)
   PRINT TAB(n); expr
   LET var = expr      (LET is optional)
   INPUT ["prompt";] var [, var2 ...]
@@ -503,10 +503,10 @@ Math Functions:
   ATN(x) ......... Arctangent (radians); Level II
   EXP(x) ......... e^x
   LOG(x) ......... Natural log
-  RND ............ Random float 0.0–0.999
   RND(0) ......... Random float 0.0–0.999
-  RND(1) ......... Random float 0.0–0.999
-  RND(n) n>1 ..... Random integer 1–n
+  RND(n) n>=1 .... Random integer 1–n, so RND(1) is always 1
+  RND ............ Random float 0.0–0.999 (extension: Level II needs
+                   an argument; Microsoft programs mean RND(0))
 
 String Functions:
   LEN(s$) ........ Length
@@ -535,7 +535,7 @@ Graphics (128 x 48 pixel overlay):
   SET(x,y) ....... Turn on pixel
   RESET(x,y) ..... Turn off pixel
   POINT(x,y) ..... Read pixel (0 or 1)
-  x: 1–128, y: 1–48
+  x: 0–127, y: 0–47
 
 Screen Memory:
   PEEK(addr) ..... Read memory byte
@@ -546,7 +546,7 @@ Screen Memory:
 Text Screen:
   64 columns x 16 rows
   Each text cell = 2x3 graphics pixels
-  PRINT@ position (1–1024, same as TRS-80 Level II; upper-left = 1)
+  PRINT@ position (0–1023, TRS-80 Level II; upper-left = 0)
 
 Variables:
   A–Z, A0–Z9      (numeric)
@@ -1380,8 +1380,8 @@ _cmdPrint(command) {
         if (match) {
             const posExpr = match[1];
             content = match[2] || '';
-            // TRS-80 Level II: PRINT@ uses 1..1024; subtract 1 for 0-based row/col (mirrors _cmd_print in TRS80_March_30_26.py).
-            let position = Math.trunc(this.evaluateExpression(posExpr)) - 1;
+            // Level II BASIC: PRINT@ uses 0..1023 (manual: upper-left=0).
+            let position = Math.trunc(this.evaluateExpression(posExpr));
             this.cursorRow = Math.trunc(position / COLS);
             this.cursorCol = position % COLS;
         } else return;
@@ -1514,8 +1514,9 @@ _cmdSetReset(command) {
         const coords = command.substring(parenStart + 1, parenEnd);
         const commaPos = this._findUnquotedComma(coords);
         if (commaPos === -1) return;
-        const x = Math.trunc(this.evaluateExpression(coords.substring(0, commaPos).trim())) - 1;
-        const y = Math.trunc(this.evaluateExpression(coords.substring(commaPos + 1).trim())) - 1;
+        // Level II BASIC: SET/RESET use 0..127, 0..47 (manual: upper-left=(0,0)).
+        const x = Math.trunc(this.evaluateExpression(coords.substring(0, commaPos).trim()));
+        const y = Math.trunc(this.evaluateExpression(coords.substring(commaPos + 1).trim()));
         if (cmdType === 'SET') this.setPixel(x, y);
         else this.resetPixel(x, y);
     } catch (e) {
@@ -2442,14 +2443,20 @@ _initBuiltinFunctions() {
 }
 
 _funcRnd(v) {
-    // RND(0) or RND(1) -> new float 0.0..0.9999 (Midway/STARTREK probabilities)
-    // RND(n>1)         -> new integer 1..n       (Snake coordinates)
-    const n = Number(v);
+    // Level II (manual page 48): RND(0) -> float 0.0..0.9999, RND(n) -> integer
+    // 1..n.  RND(1) is therefore the constant 1, NOT a float.  Microsoft 8K
+    // BASIC returns a float for any positive argument, so a program ported from
+    // it must have its RND(1) rewritten as RND(0) -- see the REM at the top of
+    // hamurabi.bas and STARTREK.bas.
+    const n = Math.trunc(Number(v));  // "RND uses the INTeger value of the argument"
     let result;
-    if (Math.trunc(n) <= 1) {
+    if (n === 0) {
         result = Math.random();
+    } else if (n < 0) {
+        this._errorFc(`RND(${n}) — argument must be positive`);
+        result = 0;
     } else {
-        result = Math.floor(Math.random() * Math.trunc(n)) + 1;
+        result = Math.floor(Math.random() * n) + 1;
     }
     this._lastRnd = result;
     return result;
@@ -2469,7 +2476,8 @@ _funcPoint(innerExpr) {
         if (parts.length < 2) return 0;
         const x = Math.trunc(this._evalNested(parts[0].trim()));
         const y = Math.trunc(this._evalNested(parts[1].trim()));
-        return this.getPixel(x - 1, y - 1);
+        // Level II BASIC: POINT uses 0..127, 0..47 (same as SET/RESET).
+        return this.getPixel(x, y);
     } catch (e) { return 0; }
 }
 
