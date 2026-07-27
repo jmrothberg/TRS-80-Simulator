@@ -47,10 +47,10 @@ cat HAILO_SETUP_README.md
 4. Run the simulator:
 ```bash
 # For Raspberry Pi with Hailo support:
-python TRS80_Sept_24_25.py
+python TRS80_July_27_26.py
 
 # For legacy 2x scaling version:
-python TRS80_Sept_7_2x.py
+python TRS80_July_27_26.py
 ```
 
 ### Basic Usage

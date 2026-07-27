@@ -40,6 +40,9 @@
 #    Jul 26 2026 - Level II RND (RND(0)=float, RND(n)=1..n; RND(1) is 1),
 #                  PRINT TAB(expr) with nested parens + trailing item (STARTREK),
 #                  PRINT@/SET/RESET/POINT already 0-based (upper-left 0 / (0,0))
+#    Jul 27 2026 - INPUT: Ctrl+C=BREAK, Esc=?REDO, Ctrl+V=paste; STOP during
+#                  INPUT breaks (bindings were swallowing Esc/Ctrl+C); toolbar
+#                  buttons take focus on click so STOP stays reachable
 #
 # ---------------------------------------------------------------------------
 #  HOW THE INTERPRETER WORKS  (read this before diving into the code)
@@ -260,8 +263,24 @@ class TRS80Simulator:
                                         font=("Arial", 8), width=3, height=1)
         self.scale_button.pack(side=tk.LEFT, padx=1)
 
+        # Toolbar must stay clickable while the Canvas holds keyboard focus
+        # (INPUT / immediate mode). takefocus + press-focus helps on macOS.
+        for w in button_frame.winfo_children():
+            try:
+                w.configure(takefocus=1)
+                w.bind('<ButtonPress-1>', lambda e, btn=w: btn.focus_set(), add='+')
+            except tk.TclError:
+                pass
+
         # Bind key press event to the main window
         self.master.bind('<Key>', self.on_key_press) # DO NOT REMOVE if removed the peek will not work
+        # Explicit bindings: INPUT's Canvas <Key> returns "break" and would
+        # otherwise swallow these before on_key_press runs.
+        self.master.bind_all('<Control-c>', self._on_ctrl_c_break)
+        self.master.bind_all('<Control-C>', self._on_ctrl_c_break)
+        self.master.bind_all('<Escape>', self._on_escape_key)
+        self.master.bind_all('<Control-v>', self._on_ctrl_v_paste)
+        self.master.bind_all('<Control-V>', self._on_ctrl_v_paste)
         self.input_area.bind("<Button-3>", self.on_input_area_click)
         self.screen.bind("<Button-3>", self.on_screen_click)
 
@@ -946,31 +965,71 @@ class TRS80Simulator:
         self.screen.config(state=tk.NORMAL)
         self.screen.focus_set()
         self.screen.config(state=tk.DISABLED)
-    
-    def on_key_press(self, event):
-        # Check for BREAK key (Ctrl+C or Escape) during program execution
-        if self.program_running and (event.keysym == 'Escape' or (event.state & 0x4 and event.keysym == 'c')):
+
+    def _on_ctrl_c_break(self, event):
+        """Ctrl+C = TRS-80 BREAK (works during INPUT; Canvas Key handler can't eat it)."""
+        if self.program_running:
             self.break_program()
             return "break"
-        
+
+    def _on_escape_key(self, event):
+        """Esc during INPUT = ?REDO; Esc while running = BREAK."""
+        # Don't steal Escape from dialogs / text editor when idle
+        if event.widget == self.input_area and not self.program_running:
+            return
+        if self.waiting_for_input and self.program_running:
+            self._redo_input()
+            return "break"
+        if self.program_running:
+            self.break_program()
+            return "break"
+
+    def _on_ctrl_v_paste(self, event):
+        """Ctrl+V paste into green-screen INPUT or immediate mode."""
+        if event.widget == self.input_area:
+            return  # ScrolledText handles its own paste
+        if self.waiting_for_input or (self.immediate_mode and not self.program_running):
+            self._paste_into_green_screen()
+            return "break"
+
+    def on_key_press(self, event):
+        # Ctrl+C = BREAK whenever a program is running (including INPUT)
+        if self.program_running and (event.state & 0x4) and event.keysym.lower() == 'c':
+            self.break_program()
+            return "break"
+
+        # Escape during INPUT = ?REDO; otherwise BREAK while running
+        if self.program_running and event.keysym == 'Escape':
+            if self.waiting_for_input:
+                self._redo_input()
+            else:
+                self.break_program()
+            return "break"
+
+        # Ctrl+V paste on green screen
+        if (event.state & 0x4) and event.keysym.lower() == 'v' and event.widget == self.screen:
+            self._paste_into_green_screen()
+            return "break"
+
         # Emergency reset: Ctrl+R to force immediate mode back on
-        if event.state & 0x4 and event.keysym == 'r' and event.widget == self.screen:
+        if event.state & 0x4 and event.keysym.lower() == 'r' and event.widget == self.screen:
             self.debug_print("Emergency reset to immediate mode (Ctrl+R)")
             self.program_running = False
             self.program_paused = False
             self.waiting_for_input = False
             self.input_variables = None
+            self._input_buffer = ""
             self.screen.unbind("<Key>")
             self.screen.unbind("<Return>")
             self.enable_immediate_mode()
             self.set_screen_focus()
             return "break"
-        
+
         if self.program_running and event.widget == self.screen:
             if self.waiting_for_input:
                 pass  # INPUT mode — handle_input_key handles this
             # Only update if no key is currently stored (simulate keyboard buffer)
-            elif not self.last_key_pressed and event.char:
+            elif not self.last_key_pressed and event.char and not (event.state & 0x4):
                 self.last_key_pressed = event.char.upper()
         elif self.immediate_mode and not self.program_running and event.widget == self.screen:
             self.handle_immediate_mode_key(event)
@@ -1039,11 +1098,46 @@ class TRS80Simulator:
             pass  # No selection
 
     def paste(self):
+        """Paste into the program text area, or into green-screen INPUT/immediate."""
+        if self.waiting_for_input or (self.immediate_mode and not self.program_running
+                                      and self.master.focus_get() == self.screen):
+            self._paste_into_green_screen()
+            return
         try:
             clipboard_text = self.master.clipboard_get()
             self.input_area.insert(tk.INSERT, clipboard_text)
         except tk.TclError:
             pass  # Nothing in clipboard
+
+    def _paste_into_green_screen(self):
+        """Paste clipboard first line into INPUT or immediate-mode prompt."""
+        try:
+            text = self.master.clipboard_get()
+        except tk.TclError:
+            return
+        line = str(text).replace('\r\n', '\n').replace('\r', '\n').split('\n')[0]
+        if self.waiting_for_input:
+            for ch in line:
+                if ch >= ' ':
+                    self._insert_input_char(ch.upper())
+            return
+        if self.immediate_mode and not self.program_running:
+            for ch in line:
+                if ch >= ' ' and ch.isprintable():
+                    uc = ch.upper()
+                    self.command_buffer += uc
+                    x = self.cursor_col * self._char_w
+                    y = self.cursor_row * self._char_h
+                    self.screen.create_text(x, y, text=uc, font=self._screen_font, fill="lime", anchor="nw",
+                        tags=(f"c{self.cursor_row}_{self.cursor_col}", self.CANVAS_TEXT_LAYER_TAG))
+                    self.screen_content[self.cursor_row][self.cursor_col] = uc
+                    self.cursor_col += 1
+                    if self.cursor_col >= 64:
+                        self.cursor_row += 1
+                        self.cursor_col = 0
+                        if self.cursor_row >= 16:
+                            self._scroll_screen_up()
+            self.update_cursor_display()
 
     def copy_screen(self):
         """Copy both text and graphics as a visual representation"""
@@ -1321,47 +1415,62 @@ class TRS80Simulator:
     
     def handle_input_key(self, event):
         if self.waiting_for_input and event.widget == self.screen:
+            # Must handle here: returning "break" below stops master/on_key_press.
+            if (event.state & 0x4) and event.keysym.lower() == 'c':
+                self.break_program()
+                return "break"
+            if event.keysym == 'Escape':
+                self._redo_input()
+                return "break"
+            if (event.state & 0x4) and event.keysym.lower() == 'v':
+                self._paste_into_green_screen()
+                return "break"
             if event.keysym == 'BackSpace':
                 self.handle_backspace(event)
             elif event.keysym in ('Shift_L', 'Shift_R', 'Control_L',
                     'Control_R', 'Alt_L', 'Alt_R', 'Meta_L', 'Meta_R',
-                    'Caps_Lock', 'Tab', 'Escape'):
+                    'Caps_Lock', 'Tab'):
                 pass  # Ignore modifier / non-printable keys
             elif event.keysym == 'space' or event.char:
                 # Explicitly handle space via keysym — on macOS Tkinter,
                 # event.char for space on a Canvas may be empty or unreliable.
                 char = ' ' if event.keysym == 'space' else event.char
-                if self.cursor_row >= 15 and self.cursor_col >= 63:
-                    self._scroll_screen_up()
-                    self.cursor_col = 0
-
-                x = self.cursor_col * self._char_w
-                y = self.cursor_row * self._char_h
-                uc = char.upper()
-                tag = f"c{self.cursor_row}_{self.cursor_col}"
-                old = self.screen.find_withtag(tag)
-                if old:
-                    self.screen.itemconfigure(old[0], text=uc)
-                else:
-                    self.screen.create_text(x, y, text=uc, font=self._screen_font, fill="lime", anchor="nw",
-                        tags=(tag, self.CANVAS_TEXT_LAYER_TAG))
-
-                self.screen_content[self.cursor_row][self.cursor_col] = uc
-                self._input_buffer += char.upper()
-                self.cursor_col += 1
-                if self.cursor_col >= 64:
-                    self.cursor_row += 1
-                    self.cursor_col = 0
-                    if self.cursor_row >= 16:
-                        self._scroll_screen_up()
-
-                if not hasattr(self, 'input_start_pos'):
-                    self.input_start_pos = f"{self.cursor_row}.{self.cursor_col - 1}"
-                
-                # Update cursor display after typing
-                self.update_cursor_display()
-                self.master.update_idletasks()
+                if char and (event.state & 0x4):
+                    return "break"  # other ctrl combos: don't insert
+                if char:
+                    self._insert_input_char(char.upper())
             return "break"
+
+    def _insert_input_char(self, uc):
+        """Draw one character into the current INPUT field and buffer."""
+        if self.cursor_row >= 15 and self.cursor_col >= 63:
+            self._scroll_screen_up()
+            self.cursor_col = 0
+
+        x = self.cursor_col * self._char_w
+        y = self.cursor_row * self._char_h
+        tag = f"c{self.cursor_row}_{self.cursor_col}"
+        old = self.screen.find_withtag(tag)
+        if old:
+            self.screen.itemconfigure(old[0], text=uc)
+        else:
+            self.screen.create_text(x, y, text=uc, font=self._screen_font, fill="lime", anchor="nw",
+                tags=(tag, self.CANVAS_TEXT_LAYER_TAG))
+
+        self.screen_content[self.cursor_row][self.cursor_col] = uc
+        self._input_buffer = getattr(self, '_input_buffer', '') + uc
+        self.cursor_col += 1
+        if self.cursor_col >= 64:
+            self.cursor_row += 1
+            self.cursor_col = 0
+            if self.cursor_row >= 16:
+                self._scroll_screen_up()
+
+        if not hasattr(self, 'input_start_pos'):
+            self.input_start_pos = f"{self.cursor_row}.{self.cursor_col - 1}"
+
+        self.update_cursor_display()
+        self.master.update_idletasks()
 
 
     def handle_backspace(self, event):
@@ -1435,7 +1544,7 @@ class TRS80Simulator:
             return "break"
 
     def break_program(self):
-        """Handle BREAK (Esc / Ctrl+C) — like the Model I BREAK key: stop run, show
+        """Handle BREAK (Ctrl+C) — like the Model I BREAK key: stop run, show
         BREAK IN line, return to immediate mode with > prompt."""
         if self.program_running:
             # Show BREAK message like original TRS-80
@@ -1445,20 +1554,28 @@ class TRS80Simulator:
                 self.print_to_screen(f"BREAK IN {line_number}")
             else:
                 self.print_to_screen("BREAK")
-            
-            # Stop the program
+
+            # Stop the program and clear INPUT wait/bindings
             self.program_running = False
             self.program_paused = False
             self.waiting_for_input = False
             self.input_variables = None
+            self._input_buffer = ""
+            self.screen.unbind("<Key>")
+            self.screen.unbind("<Return>")
             self.stop_button.config(text="STOP", state=tk.DISABLED)
             self.step_button.config(state=tk.DISABLED)
-            
+
             # Return to immediate mode
             self.enable_immediate_mode()
             self.set_screen_focus()
 
     def stop_program(self):
+        # During INPUT the run loop has returned; pause/CONT cannot clear the wait.
+        # STOP must act as BREAK so Startrek-style prompts can be aborted.
+        if self.program_running and self.waiting_for_input:
+            self.break_program()
+            return
         if self.program_running:
             if self.program_paused:
                 self.program_paused = False
@@ -1474,9 +1591,9 @@ class TRS80Simulator:
                 self.step_button.config(state=tk.NORMAL)
                 if self.variables_window_open:
                     self.update_variables_window()
-                
 
-                
+
+
                 self.enable_immediate_mode()  # Enable immediate mode when paused
         else:
             self.stop_button.config(text="STOP", state=tk.DISABLED)
@@ -4053,7 +4170,13 @@ class TRS80Simulator:
         """Handle keyboard input in immediate mode"""
         if not self.immediate_mode or self.program_running:
             return "break"
-        
+
+        if (event.state & 0x4) and event.keysym.lower() == 'v':
+            self._paste_into_green_screen()
+            return "break"
+        if (event.state & 0x4):
+            return "break"  # don't insert other ctrl chars
+
         if event.keysym == 'Return':
             # Fallback: if Return binding was somehow lost, process command here
             return self.handle_immediate_mode_return(event)

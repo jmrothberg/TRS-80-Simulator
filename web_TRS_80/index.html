@@ -287,6 +287,12 @@ constructor() {
 
     // Keyboard handling on canvas
     this.canvas.addEventListener('keydown', (e) => this._handleKeyDown(e));
+    // Browser paste (context menu / some OS shortcuts) onto the green screen
+    this.canvas.addEventListener('paste', (e) => {
+        e.preventDefault();
+        const text = e.clipboardData && e.clipboardData.getData('text');
+        if (text) this._insertPastedText(text);
+    });
 
     // Mobile/tablet virtual keyboard support
     this._mobileInput = document.getElementById('mobileKeyInput');
@@ -419,7 +425,8 @@ get _helpTexts() { return [
 
 2. Click RUN (or type RUN on the green screen).
 
-3. Press ESC or click STOP to halt a running program.
+3. Press Ctrl+C or click STOP to halt a running program (works during INPUT).
+   During INPUT, ESC re-prompts (?REDO).
 
 LOADING PROGRAMS
   Click LOAD and select a .bas file to load a program.
@@ -442,7 +449,9 @@ LOADING TAPE DATA (for adventure games, etc.)
     4. The program resumes automatically
 
 KEYBOARD
-  ESC or Ctrl+C .. BREAK (stop program)
+  Ctrl+C ......... BREAK (stop program — works during INPUT too)
+  ESC ............ During INPUT: ?REDO; otherwise BREAK
+  Ctrl+V ......... Paste into INPUT or immediate mode
   Enter .......... Submit input / execute command
   Click/tap screen . Refocus for keyboard input
   (On iPad/mobile: tap screen to open keyboard)`,
@@ -780,14 +789,35 @@ _focusForInput() {
 }
 
 _handleKeyDown(event) {
-    // BREAK: Esc or Ctrl+C
-    if (this.programRunning && (event.key === 'Escape' || (event.ctrlKey && event.key === 'c'))) {
+    const key = event.key;
+    const ctrl = event.ctrlKey || event.metaKey;
+
+    // Ctrl+C = TRS-80 BREAK (including while waiting on INPUT — e.g. STARTREK)
+    if (this.programRunning && ctrl && key.toLowerCase() === 'c') {
         this.breakProgram();
         event.preventDefault();
         return;
     }
+    // Escape during INPUT = ?REDO (re-prompt same statement)
+    if (this.waitingForInput && key === 'Escape') {
+        this._redoInput();
+        event.preventDefault();
+        return;
+    }
+    // Escape while running (not INPUT) = BREAK
+    if (this.programRunning && key === 'Escape') {
+        this.breakProgram();
+        event.preventDefault();
+        return;
+    }
+    // Ctrl+V = paste into INPUT or immediate mode
+    if (ctrl && key.toLowerCase() === 'v') {
+        event.preventDefault();
+        this._pasteFromClipboard();
+        return;
+    }
     // Emergency reset: Ctrl+R
-    if (event.ctrlKey && event.key === 'r') {
+    if (ctrl && key.toLowerCase() === 'r') {
         this.programRunning = false;
         this.programPaused  = false;
         this.waitingForInput = false;
@@ -799,8 +829,8 @@ _handleKeyDown(event) {
 
     // During program execution (not INPUT): update keyboard buffer
     if (this.programRunning && !this.waitingForInput) {
-        if (!this.lastKeyPressed && event.key.length === 1) {
-            this.lastKeyPressed = event.key.toUpperCase();
+        if (!ctrl && !this.lastKeyPressed && key.length === 1) {
+            this.lastKeyPressed = key.toUpperCase();
         }
         event.preventDefault();
         return;
@@ -808,12 +838,17 @@ _handleKeyDown(event) {
 
     // During INPUT command
     if (this.waitingForInput) {
-        if (event.key === 'Enter') {
+        if (ctrl) {
+            // Other ctrl combos: ignore (Ctrl+C / Ctrl+V handled above)
+            event.preventDefault();
+            return;
+        }
+        if (key === 'Enter') {
             this._handleInputReturn();
-        } else if (event.key === 'Backspace') {
+        } else if (key === 'Backspace') {
             this._handleInputBackspace();
-        } else if (event.key.length === 1) {
-            this._handleInputChar(event.key.toUpperCase());
+        } else if (key.length === 1) {
+            this._handleInputChar(key.toUpperCase());
         }
         event.preventDefault();
         return;
@@ -821,14 +856,43 @@ _handleKeyDown(event) {
 
     // Immediate mode
     if (this.immediateMode && !this.programRunning) {
-        if (event.key === 'Enter') {
+        if (ctrl) {
+            event.preventDefault();
+            return;
+        }
+        if (key === 'Enter') {
             this._handleImmediateModeReturn();
-        } else if (event.key === 'Backspace') {
+        } else if (key === 'Backspace') {
             this._handleImmediateModeBackspace();
-        } else if (event.key.length === 1) {
-            this._handleImmediateModeChar(event.key.toUpperCase());
+        } else if (key.length === 1) {
+            this._handleImmediateModeChar(key.toUpperCase());
         }
         event.preventDefault();
+    }
+}
+
+/** Paste clipboard text into INPUT or immediate-mode prompt (first line only). */
+async _pasteFromClipboard() {
+    try {
+        const text = await navigator.clipboard.readText();
+        if (text) this._insertPastedText(text);
+    } catch (e) {
+        this.debugPrint('Paste failed — click the green screen and allow clipboard access', 'error');
+    }
+}
+
+_insertPastedText(text) {
+    const line = String(text).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n')[0];
+    if (this.waitingForInput) {
+        for (const ch of line) {
+            if (ch >= ' ') this._handleInputChar(ch.toUpperCase());
+        }
+        return;
+    }
+    if (this.immediateMode && !this.programRunning) {
+        for (const ch of line) {
+            if (ch >= ' ') this._handleImmediateModeChar(ch.toUpperCase());
+        }
     }
 }
 
@@ -3013,6 +3077,12 @@ breakProgram() {
 }
 
 stopProgram() {
+    // During INPUT the run loop has returned; pause/CONT cannot clear the wait.
+    // STOP must act as BREAK so Startrek-style prompts can be aborted.
+    if (this.programRunning && this.waitingForInput) {
+        this.breakProgram();
+        return;
+    }
     if (this.programRunning) {
         if (this.programPaused) {
             // If we were waiting for tape, cancel that wait
