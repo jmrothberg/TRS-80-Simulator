@@ -885,8 +885,12 @@ _handleInputReturn() {
     this.debugPrint(`User input received: ${userInput}`);
 
     const parts = this._splitInputLineValues(userInput, this.inputVariables.length);
+    // Level II: letter into a numeric INPUT -> ?REDO, same statement again.
     for (let i = 0; i < this.inputVariables.length; i++) {
-        this._assignInputValue(this.inputVariables[i], parts[i] != null ? parts[i] : '');
+        if (!this._assignInputValue(this.inputVariables[i], parts[i] != null ? parts[i] : '')) {
+            this._redoInput();
+            return;
+        }
     }
 
     // Do not scroll on INPUT completion — same as TRS80_March_30_26.py (full-screen HELP/CLS).
@@ -912,9 +916,49 @@ _handleInputReturn() {
     }
 }
 
+/** Level II numeric INPUT: ints, floats, and leading-dot forms (.2). null => ?REDO. */
+_parseInputNumber(s) {
+    const text = String(s == null ? '' : s).trim();
+    if (text === '' || text === '-' || text === '+') return 0;
+    const body = (text[0] === '+' || text[0] === '-') ? text.slice(1) : text;
+    if (!body) return null;
+    let sawDigit = false, sawDot = false, i = 0;
+    while (i < body.length) {
+        const ch = body[i];
+        if (ch >= '0' && ch <= '9') { sawDigit = true; i++; }
+        else if (ch === '.' && !sawDot) { sawDot = true; i++; }
+        else break;
+    }
+    if (!sawDigit) return null;
+    if (i < body.length && (body[i] === 'E' || body[i] === 'e')) {
+        i++;
+        if (i < body.length && (body[i] === '+' || body[i] === '-')) i++;
+        const start = i;
+        while (i < body.length && body[i] >= '0' && body[i] <= '9') i++;
+        if (i === start) return null;
+    }
+    if (i !== body.length) return null;
+    const n = Number(text);
+    return Number.isFinite(n) ? n : null;
+}
+
 _parseNumeric(s) {
-    const n = Number(s);
-    return isNaN(n) ? 0 : n;
+    // Keep for non-INPUT paths that historically coerced junk to 0.
+    const n = this._parseInputNumber(s);
+    return n == null ? 0 : n;
+}
+
+_redoInput() {
+    // ENTER left the cursor after the bad characters on the same line.
+    // Level II advances first, then prints ?REDO, then ?.
+    this.printToScreen('');
+    this.printToScreen('?REDO');
+    this.printToScreen('? ', '');
+    this.waitingForInput = true;
+    this.inputStartRow = this.cursorRow;
+    this.inputStartCol = this.cursorCol;
+    this._focusForInput();
+    this.updateCursorDisplay();
 }
 
 // ------------------------------------------------------------------
@@ -1610,18 +1654,32 @@ _splitInputLineValues(userInput, numVars) {
 }
 
 _assignInputValue(varSpec, valueStr) {
+    // Returns false when a numeric variable got non-numeric text (?REDO).
     const spec = varSpec.trim();
     const arrayMatch = spec.match(this._re.arrayMatch);
     if (arrayMatch) {
         const [, arrayName, indexExpr] = arrayMatch;
         const index = this._computeArrayLinearIndex(arrayName, indexExpr);
         if (this.arrayVariables[arrayName] && index >= 0 && index < this.arrayVariables[arrayName].length) {
-            this.arrayVariables[arrayName][index] = arrayName.endsWith('$') ? valueStr : this._parseNumeric(valueStr);
+            if (arrayName.endsWith('$')) {
+                this.arrayVariables[arrayName][index] = valueStr;
+                return true;
+            }
+            const number = this._parseInputNumber(valueStr);
+            if (number == null) return false;
+            this.arrayVariables[arrayName][index] = number;
+            return true;
         }
-    } else {
-        if (spec.endsWith('$')) this.scalarVariables[spec] = valueStr;
-        else this.scalarVariables[spec] = this._parseNumeric(valueStr);
+        return true;
     }
+    if (spec.endsWith('$')) {
+        this.scalarVariables[spec] = valueStr;
+        return true;
+    }
+    const number = this._parseInputNumber(valueStr);
+    if (number == null) return false;
+    this.scalarVariables[spec] = number;
+    return true;
 }
 
 /** TRS-80 A(I,J): linear index = I * (maxJ + 1) + J */

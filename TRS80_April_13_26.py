@@ -1402,8 +1402,11 @@ class TRS80Simulator:
             self.debug_print(f"User input received: {user_input!r}")  # Debug print
 
             parts = self._split_input_line_to_values(user_input, len(self.input_variables))
+            # Level II: wrong type into a numeric variable -> ?REDO, same INPUT again.
             for var_spec, val in zip(self.input_variables, parts):
-                self._assign_input_value(var_spec, val)
+                if not self._assign_input_value(var_spec, val):
+                    self._redo_input()
+                    return "break"
             
             # Advance cursor without scrolling: scrolling here ran before the next
             # BASIC statement (e.g. CLS in HELP) and destroyed full-screen layouts.
@@ -2584,40 +2587,94 @@ class TRS80Simulator:
             parts.append('')
         return parts[:n_vars]
 
+    def _parse_input_number(self, text):
+        """Level II numeric INPUT: int/float/.2 forms. None means ?REDO."""
+        text = (text or "").strip()
+        if text in ("", "-", "+"):
+            return 0
+        body = text[1:] if text[:1] in "+-" else text
+        if not body:
+            return None
+        saw_digit = False
+        saw_dot = False
+        i = 0
+        while i < len(body):
+            ch = body[i]
+            if ch.isdigit():
+                saw_digit = True
+                i += 1
+            elif ch == "." and not saw_dot:
+                saw_dot = True
+                i += 1
+            else:
+                break
+        if not saw_digit:
+            return None
+        if i < len(body) and body[i] in "Ee":
+            i += 1
+            if i < len(body) and body[i] in "+-":
+                i += 1
+            start = i
+            while i < len(body) and body[i].isdigit():
+                i += 1
+            if i == start:
+                return None
+        if i != len(body):
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        if value == int(value) and not saw_dot and "e" not in text.lower():
+            return int(value)
+        return value
+
     def _assign_input_value(self, var_spec, value_str):
-        """Store one INPUT token into a scalar, string, or array element."""
+        """Store one INPUT token. Returns False on numeric type mismatch (?REDO)."""
         var_spec = var_spec.strip()
         m = self._regex_cache['array_match'].fullmatch(var_spec)
         if m:
             array_name, index_expr = m.groups()
             index = self._compute_array_linear_index(array_name, index_expr)
-            if array_name in self.array_variables:
-                if 0 <= index < len(self.array_variables[array_name]):
-                    if array_name.endswith('$'):
-                        self.array_variables[array_name][index] = value_str
-                    else:
-                        try:
-                            self.array_variables[array_name][index] = int(value_str)
-                        except ValueError:
-                            try:
-                                self.array_variables[array_name][index] = float(value_str)
-                            except ValueError:
-                                self.debug_print(f"Error: Invalid numeric input for {array_name}[{index}]", 'error')
-                else:
-                    self.debug_print(f"Error: Index {index} out of bounds for array {array_name}", 'error')
-            else:
+            if array_name not in self.array_variables:
                 self.debug_print(f"Error: Array {array_name} not defined", 'error')
-        else:
-            if var_spec.endswith('$'):
-                self.scalar_variables[var_spec] = value_str
-            else:
-                try:
-                    self.scalar_variables[var_spec] = int(value_str) if value_str.strip() else 0
-                except ValueError:
-                    try:
-                        self.scalar_variables[var_spec] = float(value_str)
-                    except ValueError:
-                        self.debug_print(f"Error: Invalid numeric input for {var_spec}", 'error')
+                return True
+            if not (0 <= index < len(self.array_variables[array_name])):
+                self.debug_print(f"Error: Index {index} out of bounds for array {array_name}", 'error')
+                return True
+            if array_name.endswith('$'):
+                self.array_variables[array_name][index] = value_str
+                return True
+            number = self._parse_input_number(value_str)
+            if number is None:
+                return False
+            self.array_variables[array_name][index] = number
+            return True
+        if var_spec.endswith('$'):
+            self.scalar_variables[var_spec] = value_str
+            return True
+        number = self._parse_input_number(value_str)
+        if number is None:
+            return False
+        self.scalar_variables[var_spec] = number
+        return True
+
+    def _redo_input(self):
+        """Level II: ?REDO then ? and wait again on the same INPUT statement."""
+        # ENTER left the cursor after the bad characters; advance first so
+        # ?REDO is not glued onto the same line (e.g. "A?REDO").
+        self.print_to_screen("")
+        self.print_to_screen("?REDO")
+        self.print_to_screen("? ", end='')
+        self._input_buffer = ""
+        self.waiting_for_input = True
+        self.initial_start_pos = f"{self.cursor_row + 1}.{self.cursor_col}"
+        self.screen.config(state=tk.NORMAL)
+        self.screen.bind("<Key>", self.handle_input_key)
+        self.screen.bind("<Return>", self.handle_input_return)
+        self.screen.focus_set()
+        self.update_cursor_display()
+        self.master.update_idletasks()
 
     def _compute_array_linear_index(self, array_name, index_expr):
         """TRS-80 DIM A(I,J): linear index = I*(max_J+1)+J. Single-subscript arrays unchanged."""
