@@ -28,14 +28,6 @@ Type BASIC lines directly on the green screen (immediate mode) or paste a progra
 
 ---
 
-## Also in this repository: the JMR BASIC Computer
-
-[`JMR_BASIC_COMPUTER/`](JMR_BASIC_COMPUTER/) is a separate project with a different goal. The simulators above *emulate* a TRS-80. The JMR BASIC Computer is an **original computer architecture whose native machine language is BASIC** — no Z80, no interpreter underneath, BASIC tokens as the instruction set — heading for a Digilent Nexys A7-100T FPGA. It looks and feels like a Level II machine from the outside and is completely original inside.
-
-It begins in Python, as its [Constitution](JMR_BASIC_COMPUTER/CONSTITUTION.md) requires: `python3 JMR_BASIC_COMPUTER/run_jmr.py`. See [JMR_BASIC_COMPUTER/README.md](JMR_BASIC_COMPUTER/README.md).
-
----
-
 ## Tape I/O — Loading Data Files
 
 Both simulators support TRS-80 tape I/O for reading and writing sequential data. This is how programs like SCOTTADV.BAS load game data from `.dat` files.
