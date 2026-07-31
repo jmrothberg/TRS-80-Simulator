@@ -106,6 +106,7 @@ Core Level II statements include **`PRINT`**, **`LET`** (optional), **`INPUT`**,
 
 - **`;`** — pack output; **`,`** — **16-character** print zones; trailing **`;`** or **`,`** — suppress line advance.
 - **`PRINT@ n`** — print at character index **`n`** (0-based position in the **1024**-character text frame: **`row*64 + col`**, **row 0–15**, **col 0–63**).
+- **`PRINT USING fmt$; n`** — formatted numeric print. This simulator supports basic numeric fields: **`#`** digit slots and **`.`** decimal point (e.g. `"###"`, `"##.##"`). Negative sign consumes one left `#`. Overflow prints a leading **`%`**.
 
 ### `IF … THEN … [ELSE …]`
 

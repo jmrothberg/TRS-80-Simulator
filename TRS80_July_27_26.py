@@ -314,6 +314,14 @@ class TRS80Simulator:
         self.for_loops = {}
         self.data_values = []
         self.data_pointer = 0
+        # NEW: Level II ON ERROR / ERR / ERL / RESUME + sequential files
+        self.error_goto_line = 0
+        self.err_value = 0
+        self.erl_value = 0
+        self._error_line_index = 0
+        self._pending_goto = 0
+        self._seq_files = {}
+        self._seq_chan = None
         self.last_key_pressed = None
         self.tape_file = None
         self.tape_data = []
@@ -546,7 +554,11 @@ class TRS80Simulator:
         self._regex_cache['tab'] = re.compile(r'TAB\((\d+)\)')
         # ATN must be listed: else ATN(x) reaches eval() unnamed and _eval_nested falls back to returning the raw expr string,
         # which can be stored in arrays (e.g. F(0,4)=A after 12500) and later breaks SIN(F(I,4)) with float() on that string.
-        self._regex_cache['func_match'] = re.compile(r'(INT|SIN|COS|TAN|ATN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(')
+        self._regex_cache['func_match'] = re.compile(r'(INT|SIN|COS|TAN|ATN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR|FRE)\(')
+        self._regex_cache['on_error_goto'] = re.compile(r'ON\s+ERROR\s+GOTO\s+(.*)$', re.I)
+        self._regex_cache['mem_bare'] = re.compile(r'\bMEM\b')
+        self._regex_cache['err_bare'] = re.compile(r'\bERR\b')
+        self._regex_cache['erl_bare'] = re.compile(r'\bERL\b')
         self._regex_cache['quotes'] = re.compile(r'(?<!\\)"')
         self._regex_cache['quotes_single'] = re.compile(r"(?<!\\)'")
         self._regex_cache['string_split'] = re.compile(r"""("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')""")
@@ -1300,6 +1312,13 @@ class TRS80Simulator:
         self.last_key_pressed = None
         self.data_pointer = 0
         self.data_values = []
+        # NEW: reset Level II error + sequential file state
+        self.error_goto_line = 0
+        self.err_value = 0
+        self.erl_value = 0
+        self._error_line_index = 0
+        self._pending_goto = 0
+        self._seq_chan = None
         # Optimization 2: Pre-parsed line number/command arrays
         self._line_numbers = []
         self._line_commands = []
@@ -1864,7 +1883,17 @@ class TRS80Simulator:
                 else:
                     cmd_word = self._line_cmd_words[self.current_line_index] if self.current_line_index < len(self._line_cmd_words) else None
                 result = self.execute_command(command, cmd_word=cmd_word)
-                if isinstance(result, (int,float)):
+                # NEW: ON ERROR handler jump
+                if self._pending_goto:
+                    jump = self._pending_goto
+                    self._pending_goto = 0
+                    new_index = self.find_line_index(jump)
+                    if new_index != -1:
+                        self.current_line_index = new_index
+                    else:
+                        self._error_ul(jump)
+                        return
+                elif isinstance(result, (int,float)):
                     new_index = self.find_line_index(result)
                     if new_index != -1:
                         self.current_line_index = new_index
@@ -2291,69 +2320,62 @@ class TRS80Simulator:
             cmd = self._line_commands[self.current_line_index]
             self.debug_print(f"  {msg} — source: {cmd[:200]}", 'error')
 
-    def _error_sn(self, detail=''):
-        """?SN ERROR - Syntax Error"""
-        ln = self._get_current_line_number()
-        msg = f"?SN ERROR IN {ln}"
+    def _raise_error(self, code, short_name='UE'):
+        """NEW: Level II ON ERROR — jump to handler if set. ERR=(code-1)*2."""
+        self.err_value = (int(code) - 1) * 2
+        self.erl_value = self._get_current_line_number()
+        try:
+            self.erl_value = int(float(self.erl_value)) if self.erl_value != '?' else 0
+        except Exception:
+            self.erl_value = 0
+        self._error_line_index = self.current_line_index
+        if self.error_goto_line > 0:
+            self._pending_goto = self.error_goto_line
+            if self.debug_mode:
+                self.debug_print(
+                    f"ON ERROR GOTO {self.error_goto_line} (ERR={self.err_value})",
+                    'warning')
+            return True
+        ln = self.erl_value
+        msg = f"?{short_name} ERROR IN {ln}"
         self.print_to_screen(msg)
-        self.debug_print(f"{msg}" + (f" — {detail}" if detail else ""), 'error')
+        self.debug_print(msg, 'error')
         self._error_debug_context(msg)
         self._error_stop_program()
+        return False
+
+    def _error_sn(self, detail=''):
+        trapped = self._raise_error(2, 'SN')
+        if not trapped and detail:
+            self.debug_print(f"  — {detail}", 'error')
 
     def _error_fc(self, detail=''):
-        """?FC ERROR - Illegal Function Call"""
-        ln = self._get_current_line_number()
-        msg = f"?FC ERROR IN {ln}"
-        self.print_to_screen(msg)
-        self.debug_print(f"{msg}" + (f" — {detail}" if detail else ""), 'error')
-        self._error_debug_context(msg)
-        self._error_stop_program()
+        trapped = self._raise_error(5, 'FC')
+        if not trapped and detail:
+            self.debug_print(f"  — {detail}", 'error')
 
     def _error_ul(self, line_num):
-        """?UL ERROR - Undefined Line"""
-        ln = self._get_current_line_number()
-        msg = f"?UL ERROR IN {ln}"
-        self.print_to_screen(msg)
-        self.debug_print(f"{msg} — undefined line {line_num}", 'error')
-        self._error_debug_context(msg)
-        self._error_stop_program()
+        trapped = self._raise_error(8, 'UL')
+        if not trapped:
+            self.debug_print(f"  — undefined line {line_num}", 'error')
 
     def _error_bs(self, array_name='', index=0):
-        """?BS ERROR - Bad Subscript"""
-        ln = self._get_current_line_number()
-        msg = f"?BS ERROR IN {ln}"
-        self.print_to_screen(msg)
-        self.debug_print(
-            f"{msg} — {array_name}({index}) out of bounds", 'error')
-        self._error_debug_context(msg)
-        self._error_stop_program()
+        trapped = self._raise_error(9, 'BS')
+        if not trapped:
+            self.debug_print(f"  — {array_name}({index}) out of bounds", 'error')
 
     def _error_od(self):
-        """?OD ERROR - Out of Data"""
-        ln = self._get_current_line_number()
-        msg = f"?OD ERROR IN {ln}"
-        self.print_to_screen(msg)
-        self.debug_print(f"{msg} — READ past last DATA item", 'error')
-        self._error_debug_context(msg)
-        self._error_stop_program()
+        self._raise_error(4, 'OD')
 
     def _error_nf(self, var=''):
-        """?NF ERROR - NEXT without FOR"""
-        ln = self._get_current_line_number()
-        msg = f"?NF ERROR IN {ln}"
-        self.print_to_screen(msg)
-        self.debug_print(f"{msg}" + (f" — variable {var}" if var else " — NEXT without matching FOR"), 'error')
-        self._error_debug_context(msg)
-        self._error_stop_program()
+        trapped = self._raise_error(1, 'NF')
+        if not trapped:
+            self.debug_print(
+                f"  — variable {var}" if var else "  — NEXT without matching FOR",
+                'error')
 
     def _error_rg(self):
-        """?RG ERROR - RETURN without GOSUB"""
-        ln = self._get_current_line_number()
-        msg = f"?RG ERROR IN {ln}"
-        self.print_to_screen(msg)
-        self.debug_print(f"{msg} — stack empty", 'error')
-        self._error_debug_context(msg)
-        self._error_stop_program()
+        self._raise_error(3, 'RG')
 
     # ============================================================
     #  SECTION: Interpreter Core — Command Dispatch
@@ -2390,6 +2412,11 @@ class TRS80Simulator:
             'STOP': self._cmd_stop,
             'END': self._cmd_end,
             'DEF': self._cmd_def,
+            # NEW: Level II error + sequential disk I/O
+            'ERROR': self._cmd_error,
+            'RESUME': self._cmd_resume,
+            'OPEN': self._cmd_open,
+            'CLOSE': self._cmd_close,
         }
 
     def execute_command(self, command, cmd_word=None):
@@ -2419,6 +2446,14 @@ class TRS80Simulator:
                 return self._cmd_input_tape(command)
             if command.startswith('PRINT#-1'):
                 return self._cmd_print_tape(command)
+            # NEW: PRINT#n / LINE INPUT#n
+            import re as _re
+            if _re.match(r'PRINT#\d', command, _re.I):
+                return self._cmd_print_file(command)
+            if _re.match(r'LINE\s+INPUT#\d', command, _re.I):
+                return self._cmd_line_input_file(command)
+            if _re.match(r'INPUT#\d', command, _re.I):
+                return self._cmd_line_input_file(_re.sub(r'^INPUT#', 'LINE INPUT#', command, flags=_re.I))
 
             # Extract cmd_word if not pre-parsed
             if cmd_word is None:
@@ -2470,6 +2505,100 @@ class TRS80Simulator:
                 return s + ' '
         return str(value)
 
+    def _apply_using_format(self, fmt, value):
+        """Level II PRINT USING numeric field (# and .). Sign consumes one left #."""
+        fmt = str(fmt or '').strip().strip('"').strip("'")
+        if fmt == '!':
+            s = str(value or '').strip().strip('"').strip("'")
+            return s[:1] if s else ' '
+        try:
+            num = float(value)
+        except (TypeError, ValueError):
+            return str(value).strip().strip('"').strip("'")
+        if num != num:  # NaN
+            return str(value)
+
+        neg = num < 0
+        abs_n = abs(num)
+        dot = fmt.find('.')
+        if dot < 0:
+            int_hashes = fmt.count('#')
+            frac_hashes = 0
+        else:
+            int_hashes = fmt[:dot].count('#')
+            frac_hashes = fmt[dot + 1:].count('#')
+        if int_hashes == 0 and frac_hashes == 0:
+            return str(num)
+
+        factor = 10 ** frac_hashes
+        rounded = round(abs_n * factor) / factor
+        int_part = int(rounded + 1e-12)
+        frac_num = int(round((rounded - int_part) * factor))
+        if frac_num >= factor:
+            int_part += 1
+            frac_num = 0
+        int_str = str(int_part)
+        frac_str = f'{frac_num:0{frac_hashes}d}' if frac_hashes else ''
+
+        width = int_hashes - (1 if neg else 0)
+        if width < 0 or len(int_str) > width:
+            body = f'{int_str}.{frac_str}' if frac_hashes else int_str
+            return '%' + ('-' if neg else '') + body
+        int_str = int_str.rjust(width)
+        out = ('-' if neg else '') + int_str
+        if frac_hashes:
+            out += '.' + frac_str
+        return out
+
+    def _cmd_print_using(self, content):
+        """PRINT USING format$; items — Level II formatted print."""
+        rest = content
+        if rest.upper().startswith('USING'):
+            rest = rest[5:].lstrip()
+        format_str = ''
+        if rest.startswith('"'):
+            i = 1
+            while i < len(rest) and rest[i] != '"':
+                i += 1
+            format_str = rest[1:i]
+            rest = rest[i + 1:].lstrip()
+        else:
+            sep = self.find_next_separator(rest, 0)
+            if sep == -1:
+                format_str = str(self.evaluate_expression(rest)).strip().strip('"').strip("'")
+                rest = ''
+            else:
+                format_str = str(self.evaluate_expression(rest[:sep].strip())).strip().strip('"').strip("'")
+                rest = rest[sep + 1:]
+        if rest.startswith(';') or rest.startswith(','):
+            rest = rest[1:]
+
+        output = ''
+        cursor_pos = self.cursor_col
+        start = 0
+        while start < len(rest):
+            end = self.find_next_separator(rest, start)
+            if end == -1:
+                part = rest[start:]
+                start = len(rest)
+            else:
+                part = rest[start:end]
+                start = end + 1
+            if part.strip():
+                evaluated = self.evaluate_expression(part.strip())
+                formatted = self._apply_using_format(format_str, evaluated)
+                output += formatted
+                cursor_pos += len(formatted)
+            if end != -1 and rest[end] == ',':
+                spaces = (16 - cursor_pos % 16) % 16
+                output += ' ' * spaces
+                cursor_pos += spaces
+
+        if rest.rstrip().endswith((';', ',')):
+            self.print_to_screen(output, end='')
+        else:
+            self.print_to_screen(output, end='\n')
+
     def _cmd_print(self, command):
         is_print_at = command.startswith('PRINT@')
 
@@ -2487,6 +2616,11 @@ class TRS80Simulator:
                 return  # Malformed PRINT@ — bail out
         else:
             content = command[5:].strip()
+
+        # Level II: PRINT USING format$; value [,|; value...]
+        if not is_print_at and content.upper().startswith('USING'):
+            self._cmd_print_using(content)
+            return
 
         output = ""
         cursor_pos = self.cursor_col
@@ -3003,6 +3137,12 @@ class TRS80Simulator:
             self._error_nf('')
 
     def _cmd_on(self, command):
+        # NEW: ON ERROR GOTO n (n=0 disables)
+        match = self._regex_cache['on_error_goto'].match(command)
+        if match:
+            target = int(float(self.evaluate_expression(match.group(1).strip())))
+            self.error_goto_line = target if target > 0 else 0
+            return None
         # Try ON ... GOSUB first (Model I Level II has both ON GOTO and ON GOSUB).
         match = self._regex_cache['on_gosub'].match(command)
         if match:
@@ -3405,6 +3545,20 @@ class TRS80Simulator:
             self.replaced = True
             quote_map = self._build_quote_map(expr)
 
+        # NEW: bare MEM / ERR / ERL (Level II — no parentheses)
+        def _bare_sub(rx, val):
+            nonlocal expr
+            def repl(mo):
+                i = mo.start()
+                if i < len(quote_map) and quote_map[i]:
+                    return mo.group(0)
+                return str(val)
+            expr = rx.sub(repl, expr)
+        _bare_sub(self._regex_cache['mem_bare'], self._mem_bytes())
+        _bare_sub(self._regex_cache['err_bare'], self.err_value)
+        _bare_sub(self._regex_cache['erl_bare'], self.erl_value)
+        quote_map = self._build_quote_map(expr)
+
         # --- Stage 3: Single-pass keyword translation ---
         # One combined regex matches RND, MOD, OR, AND, NOT, =, <>, ^
         # and _replace_keyword maps each to its Python equivalent,
@@ -3667,6 +3821,7 @@ class TRS80Simulator:
             'RIGHT$': self._func_right,
             'MID$': self._func_mid,
             'INSTR': self._func_instr,
+            'FRE': self._func_fre,
         }
 
     def _func_rnd(self, inner_value, inner_expr):
@@ -3711,6 +3866,10 @@ class TRS80Simulator:
         except ValueError as e:
             self.debug_print(f"Error in POINT function: {str(e)}", 'error')
             return 0
+
+    def _func_fre(self, inner_value, inner_expr):
+        # NEW: FRE("") — free string space (dummy arg ignored)
+        return self._fre_bytes()
 
     def _func_string(self, inner_value, inner_expr):
         parts = self._split_all_top_level_commas(inner_expr)
@@ -3857,6 +4016,105 @@ class TRS80Simulator:
         return ""  # Return an empty string if no key was pressed
 
     # ============================================================
+
+    # NEW: Level II ERROR / RESUME / OPEN / PRINT# / LINE INPUT# / CLOSE / MEM / FRE
+    def _mem_bytes(self):
+        prog = sum(len(l) for l in self.sorted_program)
+        vars_sz = len(repr(self.scalar_variables)) + len(repr(self.array_variables))
+        return max(1000, 48000 - prog - vars_sz)
+
+    def _fre_bytes(self):
+        return max(100, 8192 - len(repr(self.scalar_variables)))
+
+    def _cmd_error(self, command):
+        n = int(float(self.evaluate_expression(command[5:].strip())))
+        self._raise_error(n, 'UE')
+
+    def _cmd_resume(self, command):
+        rest = command[6:].strip().upper()
+        if rest == 'NEXT':
+            if self._error_line_index + 1 < len(self._line_numbers):
+                return self._line_numbers[self._error_line_index + 1]
+            return self._line_numbers[self._error_line_index]
+        if rest in ('', '0'):
+            return self._line_numbers[self._error_line_index]
+        return int(float(self.evaluate_expression(rest)))
+
+    def _cmd_open(self, command):
+        arg = command[4:].strip()
+        parts = self._split_all_top_level_commas(arg)
+        if len(parts) < 3:
+            self._raise_error(2, 'SN')
+            return
+        mode = str(self.evaluate_expression(parts[0].strip())).strip("'\"").upper()
+        name = str(self.evaluate_expression(parts[2].strip())).strip("'\"").upper()
+        if mode not in ('I', 'O'):
+            self._raise_error(2, 'SN')
+            return
+        if mode == 'O':
+            self._seq_files[name] = ''
+            self._seq_chan = {'mode': 'O', 'name': name, 'data': '', 'pos': 0}
+        else:
+            if name not in self._seq_files:
+                self._raise_error(4, 'FF')
+                return
+            self._seq_chan = {
+                'mode': 'I', 'name': name,
+                'data': self._seq_files[name], 'pos': 0,
+            }
+
+    def _cmd_close(self, command):
+        if self._seq_chan and self._seq_chan['mode'] == 'O':
+            self._seq_files[self._seq_chan['name']] = self._seq_chan['data']
+        self._seq_chan = None
+
+    def _cmd_print_file(self, command):
+        # NEW: PRINT#n — write to in-memory sequential file (mirrors JS _cmdPrintFile)
+        import re as _re
+        m = _re.match(r'PRINT#(\d+)\s*,?\s*(.*)$', command, _re.I)
+        if not m or not self._seq_chan or self._seq_chan['mode'] != 'O':
+            self._raise_error(4, 'FF')
+            return
+        content = (m.group(2) or '').strip()
+        if not content:
+            self._seq_chan['data'] += '\n'
+            return
+        # Selftest: PRINT#1,"LINE1" — evaluate items; strip quote wrappers from strings
+        try:
+            val = self.evaluate_expression(content.rstrip(';,'))
+        except Exception:
+            val = self.evaluate_expression(content.split(';')[0].split(',')[0].strip())
+        if isinstance(val, str):
+            line = val.strip("'\"")
+        else:
+            line = self._format_number(val).strip()
+        if not content.rstrip().endswith((';', ',')):
+            line += '\n'
+        self._seq_chan['data'] += line
+
+    def _cmd_line_input_file(self, command):
+        import re as _re
+        m = _re.match(r'LINE\s+INPUT#(\d+)\s*,\s*(.+)$', command, _re.I)
+        if not m or not self._seq_chan or self._seq_chan['mode'] != 'I':
+            self._raise_error(4, 'FF')
+            return
+        var_name = m.group(2).strip().upper()
+        data = self._seq_chan['data']
+        pos = self._seq_chan['pos']
+        if pos >= len(data):
+            self._raise_error(4, 'OD')
+            return
+        end = data.find('\n', pos)
+        if end < 0:
+            line, pos = data[pos:], len(data)
+        else:
+            line, pos = data[pos:end], end + 1
+        if line.endswith('\r'):
+            line = line[:-1]
+        self._seq_chan['pos'] = pos
+        self.scalar_variables[var_name] = line
+
+    # ============================================================
     #  SECTION: Graphics (SET/RESET/POINT)
     #  The 128x48 pixel grid is stored in self.pixel_matrix.
     #  SET/RESET queue operations in _pending_graphics (batched
@@ -3914,8 +4172,9 @@ class TRS80Simulator:
         self.screen.tag_raise('cursor')
 
     def get_pixel(self, x, y):
+        # NEW: Level II POINT is boolean true=-1 when set, 0 when clear
         if 0 <= x < 128 and 0 <= y < 48:
-            return self.pixel_matrix[y][x]
+            return -1 if self.pixel_matrix[y][x] else 0
         return 0
     
     def flush_graphics(self):
@@ -4397,6 +4656,7 @@ Program Commands:
 - PRINT "text" or PRINT expression [, expression...]
 - PRINT "text", expression
 - PRINT@ position, expression  (position 0-1023)
+- PRINT USING fmt$; n  (fmt like "###" / "##.##")
 - POKE address, value
 - CLS (Clear Screen)
 - LET variable = expression (LET is optional)
@@ -4458,7 +4718,7 @@ help_text3 = """
 Graphics & Screen:
 - SET(x, y): Turn on pixel (x:0-127, y:0-47)
 - RESET(x, y): Turn off pixel
-- POINT(x, y): Check pixel (returns 0 or 1)
+- POINT(x, y): Check pixel (returns -1 on, 0 off)
 - TAB(n) / TAB(expr): Move to column n in PRINT (expression + trailing text OK)
 
 Memory Functions:

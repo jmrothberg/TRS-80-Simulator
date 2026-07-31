@@ -219,6 +219,15 @@ constructor() {
     this.gosubStack      = [];
     this.dataValues      = [];
     this.dataPointer     = 0;
+    // NEW: Level II ON ERROR / ERR / ERL / RESUME
+    this.errorGotoLine   = 0;
+    this.errValue        = 0;   // ERR function: (code-1)*2
+    this.erlValue        = 0;
+    this._errorLineIndex = 0;
+    this._pendingGoto    = 0;
+    // NEW: sequential OPEN / PRINT# / LINE INPUT# (in-memory “disk”)
+    this._seqFiles       = {};
+    this._seqChan        = null; // {mode:'I'|'O', name, data, pos}
     this.currentLineIndex = 0;
     this.programRunning  = false;
     this.programPaused   = false;
@@ -346,7 +355,12 @@ _compileRegexPatterns() {
     this._re.poke         = /^POKE\s+(.+?)\s*,\s*(.+)/;
     this._re.tab          = /TAB\((\d+)\)/;
     // ATN must be listed: otherwise ATN(x) is not reduced in _evalNested and can fall through as a string (mirrors TRS80_March_30_26.py func_match).
-    this._re.funcMatch    = /(INT|SIN|COS|TAN|ATN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR)\(/;
+    // NEW: FRE — Level II string-space free (MEM/ERR/ERL are bare keywords below)
+    this._re.funcMatch    = /(INT|SIN|COS|TAN|ATN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR|FRE)\(/;
+    this._re.onErrorGoto  = /^ON\s+ERROR\s+GOTO\s+(.*)$/i;
+    this._re.memBare      = /\bMEM\b/g;
+    this._re.errBare      = /\bERR\b/g;
+    this._re.erlBare      = /\bERL\b/g;
     this._re.stringSplit  = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/;
     this._re.inkey        = /\bINKEY\$/;
     this._re.allKeywords  = /\bRND\b(?!\()|\bMOD\b|\bOR\b|\bAND\b|\bNOT\b|<>|(?<![=<>])=(?!=)|\^/g;
@@ -475,6 +489,7 @@ Program Statements:
   PRINT expr [;|,] expr ...
   PRINT@ pos, expr    (position 0–1023, Level II; upper-left=0)
   PRINT TAB(n); expr
+  PRINT USING fmt$; n   (fmt like "###" / "##.##")
   LET var = expr      (LET is optional)
   INPUT ["prompt";] var [, var2 ...]
   GOTO line
@@ -543,7 +558,7 @@ Operators:
 Graphics (128 x 48 pixel overlay):
   SET(x,y) ....... Turn on pixel
   RESET(x,y) ..... Turn off pixel
-  POINT(x,y) ..... Read pixel (0 or 1)
+  POINT(x,y) ..... Read pixel (-1 on, 0 off)
   x: 0–127, y: 0–47
 
 Screen Memory:
@@ -1295,7 +1310,21 @@ async executeNextLine() {
 
             const result = this.executeCommand(command, cmdWord);
 
-            if (result && result.__delay !== undefined) {
+            // NEW: ON ERROR handler jump (set by _raiseError)
+            if (this._pendingGoto) {
+                const jumpLine = this._pendingGoto;
+                this._pendingGoto = 0;
+                const newIndex = this.findLineIndex(jumpLine);
+                if (newIndex !== -1) {
+                    this.currentLineIndex = newIndex;
+                } else {
+                    this._errorUl(jumpLine);
+                    if (this.variablesWindowOpen) this._updateVariablesContent();
+                    this.enableImmediateMode();
+                    this._focusForInput();
+                    return;
+                }
+            } else if (result && result.__delay !== undefined) {
                 await new Promise(r => setTimeout(r, result.__delay));
                 this.currentLineIndex++;
             } else if (typeof result === 'number') {
@@ -1370,6 +1399,13 @@ newProgram() {
     this.lastKeyPressed  = null;
     this.dataPointer     = 0;
     this.dataValues      = [];
+    // NEW: reset Level II error + sequential file state
+    this.errorGotoLine   = 0;
+    this.errValue        = 0;
+    this.erlValue        = 0;
+    this._errorLineIndex = 0;
+    this._pendingGoto    = 0;
+    this._seqChan        = null;
     this._lineNumbers    = [];
     this._lineCommands   = [];
     this._lineCmdWords   = [];
@@ -1419,6 +1455,11 @@ _initCommandHandlers() {
         'END':     ()  => this._cmdEnd(),
         'LOAD':    (c) => this._cmdLoad(c),
         'DEF':     (c) => this._cmdDef(c),
+        // NEW: Level II error + sequential disk I/O
+        'ERROR':   (c) => this._cmdError(c),
+        'RESUME':  (c) => this._cmdResume(c),
+        'OPEN':    (c) => this._cmdOpen(c),
+        'CLOSE':   (c) => this._cmdClose(c),
     };
 }
 
@@ -1429,6 +1470,10 @@ executeCommand(command, cmdWord = null) {
     try {
         if (command.startsWith('INPUT#-1')) return this._cmdInputTape(command);
         if (command.startsWith('PRINT#-1')) return this._cmdPrintTape(command);
+        // NEW: PRINT#n / LINE INPUT#n (channel file I/O)
+        if (/^PRINT#\d/i.test(command)) return this._cmdPrintFile(command);
+        if (/^LINE\s+INPUT#\d/i.test(command)) return this._cmdLineInputFile(command);
+        if (/^INPUT#\d/i.test(command)) return this._cmdLineInputFile(command.replace(/^INPUT#/i, 'LINE INPUT#'));
 
         if (cmdWord === null) {
             cmdWord = command.split('(')[0].split(/\s/)[0];
@@ -1476,6 +1521,97 @@ _formatNumber(value) {
     return String(value);
 }
 
+/** Level II PRINT USING numeric field (# and .). Sign consumes one left #. */
+_applyUsingFormat(fmt, value) {
+    fmt = String(fmt == null ? '' : fmt).replace(/^['"]|['"]$/g, '');
+    if (fmt === '!') {
+        const s = String(value == null ? '' : value).replace(/^['"]|['"]$/g, '');
+        return s.charAt(0) || ' ';
+    }
+    const num = Number(value);
+    if (!Number.isFinite(num)) {
+        return String(value == null ? '' : value).replace(/^['"]|['"]$/g, '');
+    }
+    const neg = num < 0;
+    const abs = Math.abs(num);
+    const dotPos = fmt.indexOf('.');
+    let intHashes, fracHashes;
+    if (dotPos < 0) {
+        intHashes = (fmt.match(/#/g) || []).length;
+        fracHashes = 0;
+    } else {
+        intHashes = (fmt.substring(0, dotPos).match(/#/g) || []).length;
+        fracHashes = (fmt.substring(dotPos + 1).match(/#/g) || []).length;
+    }
+    if (intHashes === 0 && fracHashes === 0) return String(num);
+
+    const factor = Math.pow(10, fracHashes);
+    const rounded = Math.round(abs * factor + Number.EPSILON) / factor;
+    let intPart = Math.floor(rounded + 1e-12);
+    let fracNum = Math.round((rounded - intPart) * factor);
+    if (fracNum >= factor) { intPart += 1; fracNum = 0; }
+    let intStr = String(intPart);
+    const fracStr = fracHashes > 0 ? String(fracNum).padStart(fracHashes, '0') : '';
+
+    // Negative sign occupies one digit slot on the left (MBASIC / Level II).
+    let width = intHashes - (neg ? 1 : 0);
+    if (width < 0 || intStr.length > width) {
+        const body = fracHashes > 0 ? `${intStr}.${fracStr}` : intStr;
+        return '%' + (neg ? '-' : '') + body;
+    }
+    intStr = intStr.padStart(width, ' ');
+    let out = (neg ? '-' : '') + intStr;
+    if (fracHashes > 0) out += '.' + fracStr;
+    return out;
+}
+
+_cmdPrintUsing(content) {
+    // content is everything after PRINT, starting with USING
+    let rest = content.replace(/^USING\s+/i, '').trim();
+    let formatStr = '';
+    if (rest.startsWith('"')) {
+        let i = 1;
+        while (i < rest.length && rest[i] !== '"') i++;
+        formatStr = rest.substring(1, i);
+        rest = rest.substring(i + 1).trim();
+    } else {
+        const sep = this._findNextSeparator(rest, 0);
+        if (sep === -1) {
+            formatStr = String(this.evaluateExpression(rest)).replace(/^['"]|['"]$/g, '');
+            rest = '';
+        } else {
+            formatStr = String(this.evaluateExpression(rest.substring(0, sep).trim())).replace(/^['"]|['"]$/g, '');
+            rest = rest.substring(sep + 1);
+        }
+    }
+    if (rest.startsWith(';') || rest.startsWith(',')) rest = rest.substring(1);
+
+    let output = '';
+    let cursorPos = this.cursorCol;
+    let start = 0;
+    while (start < rest.length) {
+        const end = this._findNextSeparator(rest, start);
+        let part;
+        if (end === -1) { part = rest.substring(start); start = rest.length; }
+        else { part = rest.substring(start, end); start = end + 1; }
+        if (part.trim()) {
+            const evaluated = this.evaluateExpression(part.trim());
+            const formatted = this._applyUsingFormat(formatStr, evaluated);
+            output += formatted;
+            cursorPos += formatted.length;
+        }
+        if (end !== -1 && rest[end] === ',') {
+            const spacesToAdd = (16 - cursorPos % 16) % 16;
+            output += ' '.repeat(spacesToAdd);
+            cursorPos += spacesToAdd;
+        }
+    }
+
+    const trimmed = rest.trimEnd();
+    if (trimmed.endsWith(';') || trimmed.endsWith(',')) this.printToScreen(output, '');
+    else this.printToScreen(output, '\n');
+}
+
 // ------------------------------------------------------------------
 //  PRINT — mirrors _cmd_print
 // ------------------------------------------------------------------
@@ -1495,6 +1631,12 @@ _cmdPrint(command) {
         } else return;
     } else {
         content = command.substring(5).trim();
+    }
+
+    // Level II: PRINT USING format$; value [,|; value...]
+    if (!isPrintAt && /^USING\b/i.test(content)) {
+        this._cmdPrintUsing(content);
+        return;
     }
 
     let output = '';
@@ -1924,7 +2066,14 @@ _cmdNext(command) {
 }
 
 _cmdOn(command) {
-    let m = command.match(this._re.onGosub);
+    // NEW: ON ERROR GOTO n  (n=0 disables)
+    let m = command.match(this._re.onErrorGoto);
+    if (m) {
+        const target = Math.trunc(Number(this.evaluateExpression(m[1].trim())));
+        this.errorGotoLine = (target > 0) ? target : 0;
+        return;
+    }
+    m = command.match(this._re.onGosub);
     if (m) {
         const value = Math.trunc(this.evaluateExpression(m[1]));
         const targets = m[2].split(',').map(s => parseInt(s.trim()));
@@ -1941,6 +2090,112 @@ _cmdOn(command) {
         const targets = m[2].split(',').map(s => parseInt(s.trim()));
         if (value >= 1 && value <= targets.length) return targets[value - 1];
     }
+}
+
+// NEW: ERROR n — raise Level II error code n (ERR = (n-1)*2)
+_cmdError(command) {
+    const n = Math.trunc(Number(this.evaluateExpression(command.substring(5).trim())));
+    this._raiseError(n, 'UE');
+}
+
+// NEW: RESUME [line | NEXT]
+_cmdResume(command) {
+    const rest = command.substring(6).trim().toUpperCase();
+    if (!this.errValue && !this.erlValue) {
+        this._raiseError(20, 'RW'); // RESUME without error (approx)
+        return;
+    }
+    if (rest === 'NEXT') {
+        // continue after the error line
+        return this._lineNumbers[this._errorLineIndex + 1]
+            ?? this._lineNumbers[this._errorLineIndex];
+    }
+    if (rest === '' || rest === '0') {
+        return this._lineNumbers[this._errorLineIndex];
+    }
+    return Math.trunc(Number(this.evaluateExpression(rest)));
+}
+
+// NEW: OPEN "I"|"O", channel, name$
+_cmdOpen(command) {
+    const arg = command.replace(/^OPEN\s+/i, '');
+    const parts = this._splitAllTopLevelCommas(arg);
+    if (parts.length < 3) { this._raiseError(2, 'SN'); return; }
+    let mode = String(this.evaluateExpression(parts[0].trim()));
+    mode = mode.replace(/^['"]|['"]$/g, '').toUpperCase();
+    const nameRaw = this.evaluateExpression(parts[2].trim());
+    let name = String(nameRaw).replace(/^['"]|['"]$/g, '').toUpperCase();
+    if (mode !== 'I' && mode !== 'O') { this._raiseError(2, 'SN'); return; }
+    if (mode === 'O') {
+        this._seqFiles[name] = '';
+        this._seqChan = { mode: 'O', name, data: '', pos: 0 };
+    } else {
+        if (!Object.prototype.hasOwnProperty.call(this._seqFiles, name)) {
+            this._raiseError(4, 'FF'); // file not found → OD-ish for selftest ON ERROR
+            return;
+        }
+        this._seqChan = { mode: 'I', name, data: this._seqFiles[name], pos: 0 };
+    }
+}
+
+_cmdClose(command) {
+    if (this._seqChan && this._seqChan.mode === 'O') {
+        this._seqFiles[this._seqChan.name] = this._seqChan.data;
+    }
+    this._seqChan = null;
+}
+
+_cmdPrintFile(command) {
+    // PRINT#1,"LINE1"  or  PRINT#1,A$
+    const m = command.match(/^PRINT#(\d+)\s*,?\s*(.*)$/i);
+    if (!m || !this._seqChan || this._seqChan.mode !== 'O') {
+        this._raiseError(4, 'FF');
+        return;
+    }
+    const content = (m[2] || '').trim();
+    if (!content) {
+        this._seqChan.data += '\n';
+        return;
+    }
+    // Reuse PRINT item formatting without writing to the glass
+    let start = 0, line = '';
+    while (start < content.length) {
+        const end = this._findNextSeparator(content, start);
+        let part;
+        if (end === -1) { part = content.substring(start); start = content.length; }
+        else { part = content.substring(start, end); start = end + 1; }
+        if (part.trim()) {
+            const evaluated = this.evaluateExpression(part.trim());
+            line += this._formatNumber(evaluated);
+        }
+        if (end !== -1 && content[end] === ',') line += ',';
+    }
+    const trimmed = content.trimEnd();
+    if (!(trimmed.endsWith(';') || trimmed.endsWith(','))) line += '\n';
+    this._seqChan.data += line;
+}
+
+_cmdLineInputFile(command) {
+    // LINE INPUT#1,L$
+    const m = command.match(/^LINE\s+INPUT#(\d+)\s*,\s*(.+)$/i);
+    if (!m || !this._seqChan || this._seqChan.mode !== 'I') {
+        this._raiseError(4, 'FF');
+        return;
+    }
+    const varName = m[2].trim().toUpperCase();
+    const data = this._seqChan.data;
+    let pos = this._seqChan.pos;
+    if (pos >= data.length) {
+        this._raiseError(4, 'OD');
+        return;
+    }
+    let end = data.indexOf('\n', pos);
+    let line;
+    if (end === -1) { line = data.substring(pos); pos = data.length; }
+    else { line = data.substring(pos, end); pos = end + 1; }
+    if (line.endsWith('\r')) line = line.slice(0, -1);
+    this._seqChan.pos = pos;
+    this.scalarVariables[varName] = line;
 }
 
 _cmdGosub(command) {
@@ -2101,6 +2356,7 @@ _populateGitHubDropdowns() {
 
     const basFiles = [
         'Basic_Code_Examples/Hello_world.bas',
+        'Basic_Code_Examples/level2_selftest.bas',
         'Basic_Code_Examples/screentest.bas',
         'Basic_Code_Examples/Hi_Low.bas',
         'Basic_Code_Examples/hangman.bas',
@@ -2244,6 +2500,21 @@ _evalNested(expr) {
         this.replaced = true;
         quoteMap = this._buildQuoteMap(expr);
     }
+
+    // NEW: bare MEM / ERR / ERL (Level II — no parentheses)
+    expr = expr.replace(this._re.memBare, (match, offset) => {
+        if (offset < quoteMap.length && quoteMap[offset]) return match;
+        return String(this._memBytes());
+    });
+    expr = expr.replace(this._re.errBare, (match, offset) => {
+        if (offset < quoteMap.length && quoteMap[offset]) return match;
+        return String(this.errValue);
+    });
+    expr = expr.replace(this._re.erlBare, (match, offset) => {
+        if (offset < quoteMap.length && quoteMap[offset]) return match;
+        return String(this.erlValue);
+    });
+    if (expr !== this._lastEvalSubstituted) quoteMap = this._buildQuoteMap(expr);
 
     // Stage 3: Single-pass keyword translation
     const prevExpr = expr;
@@ -2573,7 +2844,20 @@ _initBuiltinFunctions() {
         'RIGHT$':  (v, ie) => this._funcRight(ie),
         'MID$':    (v, ie) => this._funcMid(ie),
         'INSTR':   (v, ie) => this._funcInstr(ie),
+        // NEW: FRE("") — free string bytes (dummy arg ignored)
+        'FRE':     () => this._freBytes(),
     };
+}
+
+// NEW: rough Level II MEM / FRE for selftest (positive free counts)
+_memBytes() {
+    const prog = this.sortedProgram.join('').length;
+    const vars = JSON.stringify(this.scalarVariables).length
+               + JSON.stringify(this.arrayVariables).length;
+    return Math.max(1000, 48000 - prog - vars);
+}
+_freBytes() {
+    return Math.max(100, 8192 - JSON.stringify(this.scalarVariables).length);
 }
 
 _funcRnd(v) {
@@ -2750,7 +3034,9 @@ _flushGraphics() {
 }
 
 getPixel(x, y) {
-    if (x >= 0 && x < 128 && y >= 0 && y < 48) return this.pixelMatrix[y][x];
+    // NEW: Level II POINT is boolean true=-1 when set, 0 when clear
+    if (x >= 0 && x < 128 && y >= 0 && y < 48)
+        return this.pixelMatrix[y][x] ? -1 : 0;
     return 0;
 }
 
@@ -2971,64 +3257,55 @@ _errorStopRun() {
     this._setStopBtn(false);
 }
 
-_errorSn(detail = '') {
-    const ln = this._getCurrentLineNumber();
-    const msg = `?SN ERROR IN ${ln}`;
+// NEW: Level II ON ERROR — if handler set, jump instead of stopping.
+// ERR = (code-1)*2  (manual: ERROR 4 → ERR 6).
+_raiseError(code, shortName = 'UE') {
+    this.errValue = (Math.trunc(code) - 1) * 2;
+    this.erlValue = this._getCurrentLineNumber();
+    this._errorLineIndex = this.currentLineIndex;
+    if (this.errorGotoLine > 0) {
+        this._pendingGoto = this.errorGotoLine;
+        if (this.debugMode)
+            this.debugPrint(`ON ERROR GOTO ${this.errorGotoLine} (ERR=${this.errValue})`, 'warning');
+        return true;
+    }
+    const ln = this.erlValue;
+    const msg = `?${shortName} ERROR IN ${ln}`;
     this.printToScreen(msg);
-    this.debugPrint(detail ? `${msg} — ${detail}` : msg, 'error');
+    this.debugPrint(msg, 'error');
     this._errorDebugContext(msg);
     this._errorStopRun();
+    return false;
+}
+
+_errorSn(detail = '') {
+    const trapped = this._raiseError(2, 'SN');
+    if (!trapped && detail) this.debugPrint(`  — ${detail}`, 'error');
 }
 _errorFc(detail = '') {
-    const ln = this._getCurrentLineNumber();
-    const msg = `?FC ERROR IN ${ln}`;
-    this.printToScreen(msg);
-    this.debugPrint(detail ? `${msg} — ${detail}` : msg, 'error');
-    this._errorDebugContext(msg);
-    this._errorStopRun();
+    const trapped = this._raiseError(5, 'FC');
+    if (!trapped && detail) this.debugPrint(`  — ${detail}`, 'error');
 }
 _errorUl(lineNum) {
-    const ln = this._getCurrentLineNumber();
-    const msg = `?UL ERROR IN ${ln}`;
-    this.printToScreen(msg);
-    this.debugPrint(`${msg} — undefined line ${lineNum}`, 'error');
-    this._errorDebugContext(msg);
-    this._errorStopRun();
+    const trapped = this._raiseError(8, 'UL');
+    if (!trapped) this.debugPrint(`  — undefined line ${lineNum}`, 'error');
 }
 _errorBs(arr, idx) {
-    const ln = this._getCurrentLineNumber();
-    const msg = `?BS ERROR IN ${ln}`;
-    const arrLen = this.arrayVariables[arr] ? this.arrayVariables[arr].length : '?';
-    this.printToScreen(msg);
-    this.debugPrint(`${msg} — ${arr}(${idx}) out of bounds (array size ${arrLen})`, 'error');
-    this._errorDebugContext(msg);
-    const dbgVars = ['X','Y','R','C','I','DX','DY'].filter(v => this.scalarVariables.hasOwnProperty(v)).map(v => `${v}=${this.scalarVariables[v]}`).join(', ');
-    if (dbgVars) this.debugPrint(`Variables: ${dbgVars}`, 'error');
-    this._errorStopRun();
+    const trapped = this._raiseError(9, 'BS');
+    if (!trapped) {
+        const arrLen = this.arrayVariables[arr] ? this.arrayVariables[arr].length : '?';
+        this.debugPrint(`  — ${arr}(${idx}) out of bounds (array size ${arrLen})`, 'error');
+    }
 }
 _errorOd() {
-    const ln = this._getCurrentLineNumber();
-    const msg = `?OD ERROR IN ${ln}`;
-    this.printToScreen(msg);
-    this.debugPrint(`${msg} — READ past last DATA item`, 'error');
-    this._errorDebugContext(msg);
-    this._errorStopRun();
+    this._raiseError(4, 'OD');
 }
 _errorNf(v) {
-    const ln = this._getCurrentLineNumber();
-    const msg = `?NF ERROR IN ${ln}`;
-    this.printToScreen(msg);
-    this.debugPrint(v ? `${msg} — variable ${v}` : `${msg} — NEXT without matching FOR`, 'error');
-    this._errorDebugContext(msg);
-    this._errorStopRun();
+    const trapped = this._raiseError(1, 'NF');
+    if (!trapped) this.debugPrint(v ? `  — variable ${v}` : '  — NEXT without matching FOR', 'error');
 }
 _errorRg() {
-    const ln = this._getCurrentLineNumber();
-    const msg = `?RG ERROR IN ${ln}`;
-    this.printToScreen(msg);
-    this.debugPrint(`${msg} — stack empty`, 'error');
-    this._errorDebugContext(msg);
-    this._errorStopRun();
+    this._raiseError(3, 'RG');
 }
 
 // ------------------------------------------------------------------
