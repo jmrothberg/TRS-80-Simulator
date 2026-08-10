@@ -214,6 +214,11 @@ constructor() {
     // TRS-80 DIM A(I,J): name -> [maxDim1, maxDim2] for linear indexing
     this.arrayDimensions = {};
     this.userFunctions   = {};
+    // NEW: Level II DEFINT/DEFSNG/DEFDBL/DEFSTR — 26-letter default type table
+    // (mirrors JMR functional_model VariableEngine / DEFAULT_TYPE_TABLE).
+    // 'F'=single, 'I'=integer, 'S'=string, 'D'=double (accepted as single).
+    // Cold boot only resets this; NEW/RUN/CLEAR/LOAD keep it.
+    this.defaultTypeTable = Array(26).fill('F');
     this._lastRnd        = 0;
     this.forLoops        = {};
     this.gosubStack      = [];
@@ -476,14 +481,20 @@ KEYBOARD
 
 Immediate Mode (type on green screen):
   RUN ............. Run the program
-  LIST [n[-m]] .... List program lines
+  LIST [n[-m]] .... List program (LIST / LIST n / LIST n- / LIST n-m / LIST -m)
+  LLIST ........... Same as LIST (printer alias; here → screen)
   NEW ............. Clear program memory
   CLEAR ........... Clear variables
   CONT ............ Continue after STOP
-  LOAD ............ Load .bas file
-  SAVE ............ Save program to file
+  LOAD / CLOAD .... Load .bas via computer file picker
+  SAVE / CSAVE .... Save program via computer download/picker
   CLS ............. Clear screen
   DELETE n[-m] .... Delete line(s)
+  DEFINT a[-z][,…]  Default letters to integer (CINT on assign)
+  DEFSNG a[-z][,…]  Default letters to single
+  DEFDBL a[-z][,…]  Accepted as single (Level II sugar)
+  DEFSTR a[-z][,…]  Default letters to string
+  (NEW/RUN/CLEAR/LOAD keep DEF* defaults; only cold boot resets them)
 
 Program Statements:
   PRINT expr [;|,] expr ...
@@ -582,7 +593,14 @@ Special:
   PRINT ; = no space, , = tab to column 16`,
 
 // Tab 4: Adventures
-`SCOTT ADAMS ADVENTURE GAMES
+`COLOSSAL CAVE (ADVENT.bas)
+==============================
+
+Examples dropdown → ADVENT.bas
+  (also auto-loads CAVE.DAT for OPEN/LINE INPUT#)
+Then click RUN. Type HELP for commands.
+
+SCOTT ADAMS ADVENTURE GAMES
 ==============================
 
 The simulator can run Scott Adams text adventures
@@ -1125,8 +1143,12 @@ processImmediateCommand(command) {
     if (cmd === 'RUN') {
         this.disableImmediateMode();
         this.runProgram();
-    } else if (cmd === 'LIST') {
-        this.listProgram();
+    } else if (cmd === 'LIST' || cmd === 'LLIST') {
+        // NEW: LIST ranges match JMR FM — LIST / LIST n / LIST n- / LIST n-m / LIST -m
+        // LLIST is the Level II printer alias; here it lists to the screen (no printer).
+        const rangeSpec = command.replace(/^\s*L?LIST\s*/i, '').trim();
+        if (rangeSpec) this.listProgramRange(rangeSpec);
+        else this.listProgram();
     } else if (cmd === 'NEW') {
         this.newProgram();
         this.storedProgram = [];
@@ -1147,9 +1169,11 @@ processImmediateCommand(command) {
             this.disableImmediateMode();
             this.stopProgram();
         }
-    } else if (cmd === 'LOAD') {
+    } else if (cmd === 'LOAD' || cmd === 'CLOAD') {
+        // NEW: CLOAD = LOAD alias (computer file picker — not µSD/disk)
         this._triggerLoad();
-    } else if (cmd === 'SAVE') {
+    } else if (cmd === 'SAVE' || cmd === 'CSAVE') {
+        // NEW: CSAVE = SAVE alias (computer download/picker — not µSD/disk)
         this.saveProgram();
     } else if (cmd === 'CLS') {
         this.clearScreen();
@@ -1240,6 +1264,8 @@ _prescanData() {
 // ------------------------------------------------------------------
 runProgram() {
     this.newProgram();
+    // NEW: force uppercase so LOAD'd .bas keywords match handlers (DEFINT, etc.)
+    this.inputArea.value = this.inputArea.value.toUpperCase();
     const program = this.inputArea.value.trim().split('\n');
     this.storedProgram  = this._sortProgramLines(program);
     this.originalProgram = [...program];
@@ -1453,7 +1479,19 @@ _initCommandHandlers() {
         'RESTORE': ()  => { this.dataPointer = 0; },
         'STOP':    ()  => this._cmdStop(),
         'END':     ()  => this._cmdEnd(),
+        // NEW: CLEAR as program statement (Level II: zero vars, keep DEFINT table)
+        'CLEAR':   (c) => this._cmdClear(c),
         'LOAD':    (c) => this._cmdLoad(c),
+        // NEW: CLOAD → same computer-interface LOAD path (not µSD/disk)
+        'CLOAD':   (c) => this._cmdLoad(c),
+        // NEW: in-program CSAVE/SAVE — accept keyword (no dialog). Immediate mode still uses picker.
+        'SAVE':    (c) => this._cmdSaveStmt(c),
+        'CSAVE':   (c) => this._cmdSaveStmt(c),
+        // NEW: Level II default types (JMR FM / VariableEngine.set_default_type)
+        'DEFINT':  (c) => this._cmdDefType(c, 'I'),
+        'DEFSNG':  (c) => this._cmdDefType(c, 'F'),
+        'DEFDBL':  (c) => this._cmdDefType(c, 'D'), // accepted as single
+        'DEFSTR':  (c) => this._cmdDefType(c, 'S'),
         'DEF':     (c) => this._cmdDef(c),
         // NEW: Level II error + sequential disk I/O
         'ERROR':   (c) => this._cmdError(c),
@@ -1484,6 +1522,14 @@ executeCommand(command, cmdWord = null) {
         if (/^\d+$/.test(command.trim())) return parseInt(command.trim());
 
         let handler = this._commandHandlers[cmdWord];
+        // NEW: if cached cmdWord missed (e.g. "Q=2.9"), re-parse from command text
+        if (!handler) {
+            const w = command.split('(')[0].split(/\s/)[0];
+            if (w && this._commandHandlers[w]) {
+                cmdWord = w;
+                handler = this._commandHandlers[w];
+            }
+        }
         if (!handler && command.includes('=')) {
             command = 'LET ' + command;
             cmdWord = 'LET';
@@ -1740,18 +1786,18 @@ _cmdLet(command) {
         const index = this._computeArrayLinearIndex(arrayName, indexExpr);
         if (this.arrayVariables[arrayName]) {
             if (index >= 0 && index < this.arrayVariables[arrayName].length) {
-                this.arrayVariables[arrayName][index] = arrayName.endsWith('$')
-                    ? String(this.evaluateExpression(valueExpr))
-                    : this.evaluateExpression(valueExpr);
+                // NEW: array element type follows DEFINT/DEFSTR of array name
+                const kind = this._resolveVarKind(arrayName);
+                const ev = this.evaluateExpression(valueExpr);
+                if (kind === 'S') this.arrayVariables[arrayName][index] = String(ev);
+                else if (kind === 'I') this.arrayVariables[arrayName][index] = this._cint(ev);
+                else this.arrayVariables[arrayName][index] = ev;
             } else { this._errorBs(arrayName, index); }
         } else { this._errorSn(`Array ${arrayName} not defined`); }
     } else {
-        if (varName.endsWith('$')) {
-            this.scalarVariables[varName] = String(this.evaluateExpression(valueExpr));
-        } else {
-            this.scalarVariables[varName] = this.evaluateExpression(valueExpr);
-        }
-        if (this.debugMode) this.debugPrint(`${varName} = ${this.scalarVariables[varName]}`);
+        // NEW: LET uses DEFINT CINT / DEFSTR typing (JMR STORE path)
+        this._setScalar(varName, this.evaluateExpression(valueExpr));
+        if (this.debugMode) this.debugPrint(`${varName} = ${this._getScalar(varName)}`);
     }
 }
 
@@ -1867,24 +1913,27 @@ _assignInputValue(varSpec, valueStr) {
         const [, arrayName, indexExpr] = arrayMatch;
         const index = this._computeArrayLinearIndex(arrayName, indexExpr);
         if (this.arrayVariables[arrayName] && index >= 0 && index < this.arrayVariables[arrayName].length) {
-            if (arrayName.endsWith('$')) {
+            // NEW: INPUT array element respects DEFINT/DEFSTR
+            if (this._resolveVarKind(arrayName) === 'S') {
                 this.arrayVariables[arrayName][index] = valueStr;
                 return true;
             }
             const number = this._parseInputNumber(valueStr);
             if (number == null) return false;
-            this.arrayVariables[arrayName][index] = number;
+            this.arrayVariables[arrayName][index] =
+                this._resolveVarKind(arrayName) === 'I' ? this._cint(number) : number;
             return true;
         }
         return true;
     }
-    if (spec.endsWith('$')) {
-        this.scalarVariables[spec] = valueStr;
+    // NEW: INPUT scalar via _setScalar (DEFINT/DEFSTR)
+    if (this._resolveVarKind(spec) === 'S') {
+        this._setScalar(spec, valueStr);
         return true;
     }
     const number = this._parseInputNumber(valueStr);
     if (number == null) return false;
-    this.scalarVariables[spec] = number;
+    this._setScalar(spec, number);
     return true;
 }
 
@@ -1932,7 +1981,7 @@ _cmdDim(command) {
 }
 
 _cmdDef(command) {
-    const m = command.match(/^DEF\s+FN([A-Z])\s*\(\s*([A-Z][A-Z0-9]*\$?)\s*\)\s*=\s*(.+)$/);
+    const m = command.match(/^DEF\s+FN([A-Z])\s*\(\s*([A-Z][A-Z0-9]*[%!#$]?)\s*\)\s*=\s*(.+)$/);
     if (m) {
         const letter = m[1];
         const param  = m[2];
@@ -1940,6 +1989,136 @@ _cmdDef(command) {
         this.userFunctions[letter] = { param, body };
         if (this.debugMode) this.debugPrint(`DEF FN${letter}(${param}) = ${body}`);
     }
+}
+
+// ------------------------------------------------------------------
+// NEW: DEFINT/DEFSNG/DEFDBL/DEFSTR — mirror JMR VariableEngine
+// Storage keys: integer→NAME%, string→NAME$, single→NAME (bare).
+// ------------------------------------------------------------------
+_parseVarType(name) {
+    name = String(name || '').trim();
+    if (!name) return ['', null];
+    const suf = name[name.length - 1];
+    if (suf === '%') return [name.slice(0, -1), 'I'];
+    if (suf === '!') return [name.slice(0, -1), 'F'];
+    if (suf === '#') return [name.slice(0, -1), 'D']; // accepted as single
+    if (suf === '$') return [name.slice(0, -1), 'S'];
+    return [name, null];
+}
+
+_resolveVarKind(name) {
+    const [base, spelled] = this._parseVarType(name);
+    if (spelled != null) return spelled === 'D' ? 'F' : spelled;
+    if (!base || !/[A-Z]/i.test(base[0])) return 'F';
+    const defaultType = this.defaultTypeTable[base[0].toUpperCase().charCodeAt(0) - 65];
+    return defaultType === 'D' ? 'F' : defaultType;
+}
+
+_canonicalVarKey(name) {
+    // Integer→NAME%, string→NAME$, single→NAME!  (bare NAME is only an alias
+    // for the default-type slot — never its own storage key). JMR VariableEngine.
+    const [base] = this._parseVarType(name);
+    const kind = this._resolveVarKind(name);
+    if (kind === 'S') return base + '$';
+    if (kind === 'I') return base + '%';
+    return base + '!'; // single — distinct from A% / A$
+}
+
+_setDefaultType(first, last, typeCode) {
+    for (let code = first.charCodeAt(0); code <= last.charCodeAt(0); code++) {
+        const idx = code - 65;
+        if (idx >= 0 && idx < 26) this.defaultTypeTable[idx] = typeCode;
+    }
+    this._lastVarCount = -1;
+}
+
+_cint(value) {
+    // JMR float_to_int(..., 'CINT'): floor toward -inf, int16 range
+    let n = Math.floor(Number(value));
+    if (!Number.isFinite(n)) n = 0;
+    if (n < -32768 || n > 32767) {
+        this._raiseError(6, 'OV');
+        return 0;
+    }
+    return n | 0;
+}
+
+_setScalar(name, value) {
+    const key = this._canonicalVarKey(name);
+    const kind = this._resolveVarKind(name);
+    const [base] = this._parseVarType(name);
+    // A% / A! / A$ are distinct slots — no cross-deletes (JMR VariableEngine).
+    if (kind === 'S') this.scalarVariables[key] = String(value);
+    else if (kind === 'I') this.scalarVariables[key] = this._cint(value);
+    else this.scalarVariables[key] = value;
+    this._lastVarCount = -1;
+    delete this._varRegexCache[key];
+    if (base) {
+        delete this._varRegexCache[base];
+        delete this._varRegexCache[base + '%'];
+        delete this._varRegexCache[base + '!'];
+        delete this._varRegexCache[base + '$'];
+    }
+}
+
+_getScalar(name, defaultVal = 0) {
+    const key = this._canonicalVarKey(name);
+    if (Object.prototype.hasOwnProperty.call(this.scalarVariables, key))
+        return this.scalarVariables[key];
+    return this._resolveVarKind(name) === 'S' ? '' : defaultVal;
+}
+
+_substitutionVarMap() {
+    const out = { ...this.scalarVariables };
+    for (const [key, value] of Object.entries(this.scalarVariables)) {
+        let base, kind;
+        if (key.endsWith('%')) { base = key.slice(0, -1); kind = 'I'; }
+        else if (key.endsWith('$')) { base = key.slice(0, -1); kind = 'S'; }
+        else if (key.endsWith('!')) {
+            base = key.slice(0, -1); kind = 'F';
+            out[base + '#'] = value; // # accepted as single
+        } else {
+            // legacy bare single key (pre NAME! storage)
+            base = key; kind = 'F';
+            out[base + '!'] = value;
+            out[base + '#'] = value;
+        }
+        // bare NAME aliases the default-type slot
+        if (base && this._resolveVarKind(base) === kind) out[base] = value;
+    }
+    return out;
+}
+
+_cmdDefType(command, typeCode) {
+    // Parse DEFINT A-C,X  (JMR MicroOp.DEF_TYPE_RANGE + comma loop)
+    if (!this.defaultTypeTable || this.defaultTypeTable.length !== 26)
+        this.defaultTypeTable = Array(26).fill('F');
+    const rest = command.replace(/^(DEFINT|DEFSNG|DEFDBL|DEFSTR)\s*/i, '').trim();
+    if (!rest) { this._errorSn(command); return; }
+    for (const raw of rest.split(',')) {
+        const part = raw.trim().replace(/\s+/g, '').toUpperCase();
+        const m = part.match(/^([A-Z])(?:-([A-Z]))?$/);
+        if (!m) { this._errorSn(command); return; }
+        this._setDefaultType(m[1], m[2] || m[1], typeCode);
+    }
+    if (this.debugMode) this.debugPrint(`${command.split(/\s+/)[0]} -> ${rest}`);
+}
+
+// NEW: program CLEAR — zero variables/arrays; keep DEFINT/DEFSNG/DEFDBL/DEFSTR
+_cmdClear(command) {
+    // Optional CLEAR n (string space) accepted but size is not tracked in this sim
+    this.scalarVariables = {};
+    this.arrayVariables  = {};
+    this.arrayDimensions = {};
+    this.userFunctions   = {};
+    this.forLoops = {};
+    this.gosubStack = [];
+    this.dataPointer = 0;
+    this._lastRnd = 0;
+    this._sortedVarsCache = [];
+    this._lastVarCount = -1;
+    this._varRegexCache = {};
+    this._arrayPatterns = {};
 }
 
 // ------------------------------------------------------------------
@@ -1971,7 +2150,9 @@ _cmdIf(command) {
         const thenAction = m[2];
         const elseAction = m[4] || null;
         const result = this.evaluateExpression(condition);
-        if (result) {
+        // NEW: numeric truthiness only (+result). Eval-failure strings used to be
+        // truthy and false-PASS'd checks like IF A=5 AND A%=5 when A% broke JS eval.
+        if (+result) {
             if (this.debugMode) this.debugPrint(`IF ${condition} -> TRUE; THEN ${thenAction}`);
             // Implicit GOTO: IF ... THEN <line-number>
             const trimmed = thenAction.trim();
@@ -2037,7 +2218,8 @@ _cmdFor(command) {
         const nextIdx = this.currentLineIndex + 1;
         const nextLn  = nextIdx < this._lineNumbers.length ? this._lineNumbers[nextIdx] : null;
         this.forLoops[varName] = { start, end, step, current: start, lineIndex: this.currentLineIndex, nextLineNumber: nextLn };
-        this.scalarVariables[varName] = start;
+        // NEW: FOR index uses DEFINT coercion when applicable
+        this._setScalar(varName, start);
         if (this.debugMode) this.debugPrint(`FOR ${varName}=${start} TO ${end} STEP ${step}`);
     }
 }
@@ -2056,8 +2238,9 @@ _cmdNext(command) {
     const loop = this.forLoops[varName];
     // Read from scalar variable so manual changes (e.g., AI=NA to break loop)
     // are respected — real TRS-80 BASIC reads the variable, not an internal copy
-    loop.current = (this.scalarVariables[varName] ?? loop.current) + loop.step;
-    this.scalarVariables[varName] = loop.current;
+    // NEW: _getScalar/_setScalar so DEFINT I uses the I% slot
+    loop.current = this._getScalar(varName, loop.current) + loop.step;
+    this._setScalar(varName, loop.current);
     if ((loop.step > 0 && loop.current <= loop.end) || (loop.step < 0 && loop.current >= loop.end)) {
         return loop.nextLineNumber;
     } else {
@@ -2195,7 +2378,7 @@ _cmdLineInputFile(command) {
     else { line = data.substring(pos, end); pos = end + 1; }
     if (line.endsWith('\r')) line = line.slice(0, -1);
     this._seqChan.pos = pos;
-    this.scalarVariables[varName] = line;
+    this._setScalar(varName, line);
 }
 
 _cmdGosub(command) {
@@ -2240,15 +2423,17 @@ _cmdRead(command) {
             const [, arrName, idxExpr] = arrayMatch;
             const idx = this._computeArrayLinearIndex(arrName, idxExpr);
             if (this.arrayVariables[arrName] && idx >= 0 && idx < this.arrayVariables[arrName].length) {
-                this.arrayVariables[arrName][idx] = arrName.endsWith('$')
-                    ? value.replace(/^['"]|['"]$/g, '') : this.evaluateExpression(value);
+                const kind = this._resolveVarKind(arrName);
+                if (kind === 'S') this.arrayVariables[arrName][idx] = value.replace(/^['"]|['"]$/g, '');
+                else if (kind === 'I') this.arrayVariables[arrName][idx] = this._cint(this.evaluateExpression(value));
+                else this.arrayVariables[arrName][idx] = this.evaluateExpression(value);
             }
         } else {
-            if (varName.endsWith('$')) {
-                this.scalarVariables[varName] = value.replace(/^['"]|['"]$/g, '');
-            } else {
-                this.scalarVariables[varName] = this.evaluateExpression(value);
-            }
+            // NEW: READ respects DEFINT/DEFSTR
+            if (this._resolveVarKind(varName) === 'S')
+                this._setScalar(varName, value.replace(/^['"]|['"]$/g, ''));
+            else
+                this._setScalar(varName, this.evaluateExpression(value));
         }
         this.dataPointer++;
     }
@@ -2282,8 +2467,8 @@ _cmdLoad(command) {
 _cmdInputTape(command) {
     const varName = command.split(',')[1].trim();
     if (this.tapePointer < this.tapeData.length) {
-        this.scalarVariables[varName] = this.tapeData[this.tapePointer++];
-        this.debugPrint(`Tape read: ${varName} = ${this.scalarVariables[varName]}`);
+        this._setScalar(varName, this.tapeData[this.tapePointer++]);
+        this.debugPrint(`Tape read: ${varName} = ${this._getScalar(varName)}`);
     } else {
         // No tape loaded — pause execution and prompt the user to insert tape.
         // Step back so this same INPUT#-1 line re-executes after tape is loaded.
@@ -2366,9 +2551,9 @@ _populateGitHubDropdowns() {
         'Basic_Code_Examples/asteroid.bas',
         'Basic_Code_Examples/breakout_II.bas',
         'Basic_Code_Examples/Invaders_V.bas',
-        'Basic_Code_Examples/Invaders_VI.bas',
         'Basic_Code_Examples/STARTREK.bas',
         'Basic_Code_Examples/Midway_Campaign_TRS80.bas',
+        'Basic_Code_Examples/ADVENT.bas',
         'Scott_Adams_Basic_version/SCOTTADV.BAS',
     ];
     for (const path of basFiles) {
@@ -2406,6 +2591,36 @@ _populateGitHubDropdowns() {
     }
 }
 
+// NEW: ADVENT.bas uses OPEN/LINE INPUT# against CAVE.DAT (not tape INPUT#-1).
+// Preload into _seqFiles so OPEN "I",1,"CAVE.DAT" succeeds.
+async _preloadAdventCaveDat(basFilename) {
+    if (!basFilename || String(basFilename).toUpperCase() !== 'ADVENT.BAS') return;
+    // Local serve from web_TRS_80/ or docs/ first; then GitHub raw (Pages / Examples dropdown).
+    const candidates = [
+        '../Basic_Code_Examples/CAVE.DAT',
+        'https://raw.githubusercontent.com/jmrothberg/TRS-80-Simulator/main/Basic_Code_Examples/CAVE.DAT',
+    ];
+    let lastErr = null;
+    for (const url of candidates) {
+        try {
+            const bustUrl = url.includes('://')
+                ? `${url}${url.includes('?') ? '&' : '?'}_=${Date.now()}`
+                : url;
+            const response = await fetch(bustUrl, { cache: 'no-store', mode: 'cors' });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            let content = await response.text();
+            if (content.charCodeAt(0) === 0xfeff) content = content.slice(1);
+            this._seqFiles['CAVE.DAT'] = content;
+            this.printToScreen('DISK LOADED: CAVE.DAT');
+            return;
+        } catch (err) {
+            lastErr = err;
+        }
+    }
+    this.printToScreen(`?DISK LOAD ERROR: CAVE.DAT — ${lastErr && lastErr.message}`);
+    if (this.debugMode) this.debugPrint(`CAVE.DAT preload failed: ${lastErr && lastErr.message}`, 'error');
+}
+
 async _loadFromGitHub(selectEl, type) {
     const url = selectEl.value;
     if (!url) return;
@@ -2426,6 +2641,8 @@ async _loadFromGitHub(selectEl, type) {
             this.inputArea.value = lines.join('\n');
             this.storedProgram = lines;
             this.printToScreen(`LOADED: ${filename}`);
+            // NEW: companion disk file for Colossal Cave
+            await this._preloadAdventCaveDat(filename);
             this.enableImmediateMode();
         } else {
             const lines = content.split('\n').map(l => l.trim()).filter(l => l !== '');
@@ -2470,6 +2687,11 @@ evaluateExpression(expr) {
         return parseInt(stripped);
     // Fast path: simple variable lookup
     if (this.scalarVariables.hasOwnProperty(stripped)) return this.scalarVariables[stripped];
+    // NEW: bare name may resolve to typed slot (DEFINT A → A%)
+    if (/^[A-Z][A-Z0-9]*[%!#$]?$/.test(stripped)) {
+        const key = this._canonicalVarKey(stripped);
+        if (this.scalarVariables.hasOwnProperty(key)) return this.scalarVariables[key];
+    }
 
     return this._evalNested(expr);
 }
@@ -2573,15 +2795,16 @@ _evalNested(expr) {
             }
             if (parenCount !== 0) break;
             const argValue = this._evalNested(expr.substring(argStart, argEnd));
-            // Save/restore parameter for local scoping
-            const hadParam = this.scalarVariables.hasOwnProperty(def.param);
-            const savedValue = this.scalarVariables[def.param];
-            this.scalarVariables[def.param] = argValue;
+            // Save/restore parameter for local scoping (canonical key for DEFINT params)
+            const paramKey = this._canonicalVarKey(def.param);
+            const hadParam = this.scalarVariables.hasOwnProperty(paramKey);
+            const savedValue = this.scalarVariables[paramKey];
+            this._setScalar(def.param, argValue);
             let result;
             try { result = this.evaluateExpression(def.body); }
             finally {
-                if (hadParam) this.scalarVariables[def.param] = savedValue;
-                else delete this.scalarVariables[def.param];
+                if (hadParam) this.scalarVariables[paramKey] = savedValue;
+                else delete this.scalarVariables[paramKey];
             }
             const sv = String(result);
             const replacement = (typeof result === 'number' && result < 0) ? `(${sv})` : sv;
@@ -2640,9 +2863,11 @@ _evalNested(expr) {
     const parts = expr.split(this._re.stringSplit);
     const hasAlpha = /[a-zA-Z]/.test(expr);
     if (hasAlpha && Object.keys(this.scalarVariables).length > 0) {
-        const varCount = Object.keys(this.scalarVariables).length;
+        // NEW: include bare aliases for DEFINT/DEFSTR typed slots
+        const subMap = this._substitutionVarMap();
+        const varCount = Object.keys(subMap).length;
         if (varCount !== this._lastVarCount) {
-            this._sortedVarsCache = Object.keys(this.scalarVariables).sort((a, b) => b.length - a.length);
+            this._sortedVarsCache = Object.keys(subMap).sort((a, b) => b.length - a.length);
             this._lastVarCount = varCount;
         }
         for (let pi = 0; pi < parts.length; pi += 2) {
@@ -2650,15 +2875,18 @@ _evalNested(expr) {
             let partQuoteMap = this._buildQuoteMap(parts[pi]);
 
             for (const varName of this._sortedVarsCache) {
-                const value = this.scalarVariables[varName];
+                if (!Object.prototype.hasOwnProperty.call(subMap, varName)) continue;
+                const value = subMap[varName];
                 if (!this._varRegexCache[varName]) {
                     let pattern;
                     if (TRS80Simulator.PROTECTED_FUNCTIONS.has(varName.toUpperCase())) {
-                        pattern = '\\b' + varName.replace('$', '\\$') + '\\b(?!\\()';
+                        pattern = '\\b' + varName.replace(/[%!#$]/g, '\\$&') + '\\b(?!\\()';
+                    } else if (/[%!#$]$/.test(varName)) {
+                        // % ! $ # are non-word — same as $: no \b on the right
+                        pattern = varName.replace(/[%!#$]/g, '\\$&');
                     } else {
-                        pattern = varName.endsWith('$')
-                            ? varName.replace('$', '\\$')
-                            : '\\b' + varName + '\\b';
+                        // NEW: (?![%!#$]) so bare A does not match the A inside A% / A! / A$ / A#
+                        pattern = '\\b' + varName + '\\b(?![%!#$])';
                     }
                     this._varRegexCache[varName] = new RegExp(pattern, 'g');
                 }
@@ -2672,7 +2900,8 @@ _evalNested(expr) {
                     const s = m.index, e = m.index + m[0].length;
                     if (!(s < partQuoteMap.length && partQuoteMap[s])) {
                         newParts.push(parts[pi].substring(lastEnd, s));
-                        if (varName.endsWith('$')) {
+                        // NEW: DEFSTR bare names are strings even without $
+                        if (varName.endsWith('$') || typeof value === 'string') {
                             const safe = String(value).replace(/'/g, "\\'");
                             newParts.push(`'${safe}'`);
                         } else {
@@ -2708,7 +2937,8 @@ _evalNested(expr) {
         return result;
     } catch (e) {
         if (this.debugMode) this.debugPrint(`Evaluation failed: ${e.message}`, 'error');
-        return expr.replace(/^['"]|['"]$/g, '');
+        // NEW: return 0 (not the expr string) so IF cannot false-PASS on bad A% eval
+        return 0;
     }
 }
 
@@ -3043,6 +3273,12 @@ getPixel(x, y) {
 // ------------------------------------------------------------------
 //  File I/O — SAVE / LOAD
 // ------------------------------------------------------------------
+// NEW: in-program SAVE/CSAVE — accept keyword for glass selftest (no picker).
+// Immediate-mode SAVE/CSAVE still calls saveProgram() (computer download).
+_cmdSaveStmt(command) {
+    if (this.debugMode) this.debugPrint(`SAVE/CSAVE (program): accepted — ${command}`);
+}
+
 async saveProgram() {
     const lines = this._sortProgramLines(this.inputArea.value.trim().split('\n'));
     this.inputArea.value = lines.join('\n');
@@ -3090,12 +3326,14 @@ _handleFileLoad(event) {
     const autoRun = this._autoRunAfterLoad;
     this._autoRunAfterLoad = false;
     const reader = new FileReader();
-    reader.onload = (e) => {
+    reader.onload = async (e) => {
         const content = e.target.result;
         const lines = this._sortProgramLines(content.trim().split('\n'));
         this.inputArea.value = lines.join('\n');
         this.storedProgram = lines;
         this.printToScreen(`LOADED: ${file.name}`);
+        // NEW: local LOAD of ADVENT.bas also needs CAVE.DAT in _seqFiles
+        await this._preloadAdventCaveDat(file.name);
         // If LOAD was called from within a program, auto-RUN the loaded file
         if (autoRun) {
             setTimeout(() => this.runProgram(), 50);
@@ -3402,6 +3640,46 @@ listProgram() {
     this.storedProgram = lines;
     this.inputArea.value = lines.join('\n');
     if (lines.length) this.printToScreen(lines.join('\n'));
+}
+
+// NEW: LIST n / LIST n-m / LIST n- / LIST -m — same forms as JMR FM microcode _list()
+listProgramRange(rangeSpec) {
+    const lines = this._sortProgramLines(this.inputArea.value.trim().split('\n'));
+    this.storedProgram = lines;
+    this.inputArea.value = lines.join('\n');
+
+    try {
+        let first = 0;
+        let last = 0xFFFF;
+        const spec = String(rangeSpec).replace(/\s+/g, '');
+        if (!spec) {
+            this.listProgram();
+            return;
+        }
+        if (spec.includes('-')) {
+            const dash = spec.indexOf('-');
+            const a = spec.slice(0, dash);
+            const b = spec.slice(dash + 1);
+            if (a === '' && b === '') throw new Error('bad range');
+            if (a !== '') first = parseFloat(a);
+            if (b !== '') last = parseFloat(b);
+            // LIST n- → last stays 0xFFFF; LIST -m → first stays 0
+        } else {
+            // LIST n lists one line
+            first = last = parseFloat(spec);
+        }
+        if (Number.isNaN(first) || Number.isNaN(last)) throw new Error('bad number');
+
+        const matched = lines.filter(l => {
+            if (!l.trim()) return false;
+            const n = parseFloat(l);
+            return n >= first && n <= last;
+        });
+        if (matched.length) this.printToScreen(matched.join('\n'));
+        else this.printToScreen('NO SUCH LINE');
+    } catch (e) {
+        this.printToScreen('?SYNTAX ERROR');
+    }
 }
 
 _clearVariablesBtn() {
