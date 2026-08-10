@@ -46,6 +46,8 @@
 #    Aug  2 2026 - DEFINT/DEFSNG/DEFDBL/DEFSTR from JMR FM (default-type table,
 #                  CINT on integer assign; kept across NEW/RUN/CLEAR/LOAD);
 #                  LIST n-/LIST -m; LLIST/CLOAD/CSAVE aliases (computer dialog)
+#    Aug 10 2026 - INPUT matches web: always "? " after prompt; Enter advances
+#                  like PRINT newline (scroll on last row — no OKAKE FOOD)
 #
 # ---------------------------------------------------------------------------
 #  HOW THE INTERPRETER WORKS  (read this before diving into the code)
@@ -1544,13 +1546,13 @@ class TRS80Simulator:
                     self._redo_input()
                     return "break"
             
-            # Advance cursor without scrolling: scrolling here ran before the next
-            # BASIC statement (e.g. CLS in HELP) and destroyed full-screen layouts.
+            # NEW: advance like PRINT newline — scroll when on last row so OK /
+            # next INPUT ">" do not overwrite ">TAKE FOOD" → "OKAKE FOOD".
             self.cursor_col = 0
-            if self.cursor_row < 15:
-                self.cursor_row += 1
-            else:
-                self.cursor_row = 15
+            self.cursor_row += 1
+            if self.cursor_row >= 16:
+                self._scroll_screen_up()
+            self.update_cursor_display()
 
             self.waiting_for_input = False
             self.input_variables = None
@@ -3016,11 +3018,12 @@ class TRS80Simulator:
         if not var_names:
             self.debug_print("INPUT: no variables", 'warning')
             return
+        # Level II / JMR / web: optional prompt string, then always "? "
         if prompt is not None:
             self.print_to_screen(prompt, end='')
             self.debug_print(f"INPUT {var_names} prompt={prompt!r}")
-        else:
-            self.print_to_screen("? ", end='')
+        self.print_to_screen("? ", end='')
+        if prompt is None:
             self.debug_print(f"INPUT {var_names}")
         self.waiting_for_input = True
         self.input_variables = var_names
