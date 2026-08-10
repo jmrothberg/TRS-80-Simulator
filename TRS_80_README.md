@@ -98,14 +98,15 @@ Commands you can type at the `>` prompt:
 | Command | Description | Examples |
 |---------|-------------|----------|
 | `RUN` | Execute the program | `RUN` |
-| `LIST` | Display program | `LIST`<br>`LIST 100`<br>`LIST 10-50` |
+| `LIST` / `LLIST` | Display program (`LLIST` → screen here; no printer) | `LIST`<br>`LIST 100`<br>`LIST 10-50`<br>`LIST 100-`<br>`LIST -50` |
 | `NEW` | Clear program and variables | `NEW` |
 | `CLEAR` | Clear variables only | `CLEAR` |
 | `CONT` | Continue after STOP | `CONT` |
-| `LOAD` | Load program from file | `LOAD` |
-| `SAVE` | Save program to file | `SAVE` |
+| `LOAD` / `CLOAD` | Load `.bas` via computer file picker | `LOAD` / `CLOAD` |
+| `SAVE` / `CSAVE` | Save via computer download/picker | `SAVE` / `CSAVE` |
 | `DELETE` | Remove program lines | `DELETE 50`<br>`DELETE 100-200` |
 | `CLS` | Clear screen | `CLS` |
+| `DEFINT` / `DEFSNG` / `DEFDBL` / `DEFSTR` | Default type for letter ranges (Level II; `DEFDBL`→single here). Kept across `NEW`/`RUN`/`CLEAR`/`LOAD`. | `DEFINT I`<br>`DEFINT A-C,X`<br>`DEFSTR S` |
 
 You can also:
 - Enter program lines: `>10 PRINT "HELLO"`

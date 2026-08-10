@@ -43,6 +43,9 @@
 #    Jul 27 2026 - INPUT: Ctrl+C=BREAK, Esc=?REDO, Ctrl+V=paste; STOP during
 #                  INPUT breaks (bindings were swallowing Esc/Ctrl+C); toolbar
 #                  buttons take focus on click so STOP stays reachable
+#    Aug  2 2026 - DEFINT/DEFSNG/DEFDBL/DEFSTR from JMR FM (default-type table,
+#                  CINT on integer assign; kept across NEW/RUN/CLEAR/LOAD);
+#                  LIST n-/LIST -m; LLIST/CLOAD/CSAVE aliases (computer dialog)
 #
 # ---------------------------------------------------------------------------
 #  HOW THE INTERPRETER WORKS  (read this before diving into the code)
@@ -305,6 +308,11 @@ class TRS80Simulator:
         # TRS-80 DIM A(I,J): maps array name -> (max_dim1, max_dim2) for linear indexing
         self.array_dimensions = {}
         self.user_functions = {}
+        # NEW: Level II DEFINT/DEFSNG/DEFDBL/DEFSTR — 26-letter default type table
+        # (mirrors JMR functional_model VariableEngine / DEFAULT_TYPE_TABLE).
+        # 'F'=single, 'I'=integer, 'S'=string, 'D'=double (accepted as single).
+        # Cold boot only resets this; NEW/RUN/CLEAR/LOAD keep it.
+        self.default_type_table = ['F'] * 26
         self.current_line_index = 0
         self.program_running = False
         self.program_paused = False
@@ -579,8 +587,8 @@ class TRS80Simulator:
             r'|\bOR\b'
             r'|\bAND\b'
             r'|\bNOT\b'
-            r'|<>'               # not-equal
-            r'|(?<![=<>])=(?!=)' # single = (not ==, <=, >=, <>)
+            # NEW: = not after ! (A!=4 is typed A! equality, not !=)
+            r'|(?<![!<>=])=(?!=)'
             r'|\^'               # exponent
         )
 
@@ -2411,6 +2419,13 @@ class TRS80Simulator:
             'RESTORE': self._cmd_restore,
             'STOP': self._cmd_stop,
             'END': self._cmd_end,
+            # NEW: CLEAR as program statement (Level II: zero vars, keep DEFINT table)
+            'CLEAR': self._cmd_clear,
+            # NEW: Level II default types (JMR FM / VariableEngine.set_default_type)
+            'DEFINT': self._cmd_defint,
+            'DEFSNG': self._cmd_defsng,
+            'DEFDBL': self._cmd_defdbl,
+            'DEFSTR': self._cmd_defstr,
             'DEF': self._cmd_def,
             # NEW: Level II error + sequential disk I/O
             'ERROR': self._cmd_error,
@@ -2704,10 +2719,15 @@ class TRS80Simulator:
                 index = self._compute_array_linear_index(array_name, index)
                 if array_name in self.array_variables:
                     if 0 <= index < len(self.array_variables[array_name]):
-                        if array_name.endswith('$'):
-                            self.array_variables[array_name][index] = str(self.evaluate_expression(value))
+                        # NEW: array element type follows DEFINT/DEFSTR of array name
+                        kind = self._resolve_var_kind(array_name)
+                        ev = self.evaluate_expression(value)
+                        if kind == 'S':
+                            self.array_variables[array_name][index] = str(ev)
+                        elif kind == 'I':
+                            self.array_variables[array_name][index] = self._cint(ev)
                         else:
-                            self.array_variables[array_name][index] = self.evaluate_expression(value)
+                            self.array_variables[array_name][index] = ev
                         if self.debug_mode:
                             self.debug_print(f"Array assignment: {array_name}[{index}] = {self.array_variables[array_name][index]}")
                     else:
@@ -2715,12 +2735,10 @@ class TRS80Simulator:
                 else:
                     self._error_sn(f"Array {array_name} not defined")
             else:
-                if var_name.endswith('$'):
-                    self.scalar_variables[var_name] = str(self.evaluate_expression(value))
-                else:
-                    self.scalar_variables[var_name] = self.evaluate_expression(value)
+                # NEW: LET uses DEFINT CINT / DEFSTR typing (JMR STORE path)
+                self._set_scalar(var_name, self.evaluate_expression(value))
                 if self.debug_mode:
-                    self.debug_print(f"Variable assignment: {var_name} = {self.scalar_variables[var_name]}")
+                    self.debug_print(f"Variable assignment: {var_name} = {self._get_scalar(var_name)}")
 
     def _cmd_rem(self, command):
         pass
@@ -2893,21 +2911,25 @@ class TRS80Simulator:
             if not (0 <= index < len(self.array_variables[array_name])):
                 self.debug_print(f"Error: Index {index} out of bounds for array {array_name}", 'error')
                 return True
-            if array_name.endswith('$'):
+            # NEW: INPUT array element respects DEFINT/DEFSTR
+            if self._resolve_var_kind(array_name) == 'S':
                 self.array_variables[array_name][index] = value_str
                 return True
             number = self._parse_input_number(value_str)
             if number is None:
                 return False
+            if self._resolve_var_kind(array_name) == 'I':
+                number = self._cint(number)
             self.array_variables[array_name][index] = number
             return True
-        if var_spec.endswith('$'):
-            self.scalar_variables[var_spec] = value_str
+        # NEW: INPUT scalar via _set_scalar (DEFINT/DEFSTR)
+        if self._resolve_var_kind(var_spec) == 'S':
+            self._set_scalar(var_spec, value_str)
             return True
         number = self._parse_input_number(value_str)
         if number is None:
             return False
-        self.scalar_variables[var_spec] = number
+        self._set_scalar(var_spec, number)
         return True
 
     def _redo_input(self):
@@ -2976,7 +2998,7 @@ class TRS80Simulator:
         var_name = command.split(',')[1].strip()
         tape_data = self.read_from_tape()
         if tape_data is not None:
-            self.scalar_variables[var_name] = tape_data
+            self._set_scalar(var_name, tape_data)
             self.debug_print(f"Read from tape: {var_name} = {tape_data}")
         else:
             self.debug_print("Error: No more data on tape")
@@ -3036,7 +3058,12 @@ class TRS80Simulator:
         if match:
             condition, then_action, _, else_action = match.groups()
             condition_result = self.evaluate_expression(condition)
-            if condition_result:
+            # NEW: numeric truthiness only — eval-failure strings must not false-PASS IF
+            try:
+                _truth = float(condition_result) != 0
+            except (TypeError, ValueError):
+                _truth = False
+            if _truth:
                 trimmed = then_action.strip()
                 if self.debug_mode:
                     self.debug_print(f"IF {condition} -> TRUE; THEN {then_action}")
@@ -3101,7 +3128,8 @@ class TRS80Simulator:
                 'line_index': self.current_line_index,
                 'next_line_number': next_ln,
             }
-            self.scalar_variables[var] = start
+            # NEW: FOR index uses DEFINT coercion when applicable
+            self._set_scalar(var, start)
             if self.debug_mode:
                 self.debug_print(f"FOR {var}={start} TO {end} STEP {step}")
 
@@ -3122,8 +3150,9 @@ class TRS80Simulator:
             loop = self.for_loops[var]
             # Read from scalar variable so manual changes (e.g., AI=NA to break)
             # are respected — real TRS-80 BASIC reads the variable, not an internal copy
-            loop['current'] = self.scalar_variables.get(var, loop['current']) + loop['step']
-            self.scalar_variables[var] = loop['current']
+            # NEW: _get_scalar/_set_scalar so DEFINT I uses the I% slot
+            loop['current'] = self._get_scalar(var, loop['current']) + loop['step']
+            self._set_scalar(var, loop['current'])
             if (loop['step'] > 0 and loop['current'] <= loop['end']) or (loop['step'] < 0 and loop['current'] >= loop['end']):
                 if self.debug_mode:
                     self.debug_print(f"NEXT {var} -> {loop['current']} (repeat)")
@@ -3213,8 +3242,11 @@ class TRS80Simulator:
                     index = self._compute_array_linear_index(array_name, index)
                     if array_name in self.array_variables:
                         if 0 <= index < len(self.array_variables[array_name]):
-                            if array_name.endswith('$'):
+                            kind = self._resolve_var_kind(array_name)
+                            if kind == 'S':
                                 self.array_variables[array_name][index] = value.strip("'\"")
+                            elif kind == 'I':
+                                self.array_variables[array_name][index] = self._cint(self.evaluate_expression(value))
                             else:
                                 self.array_variables[array_name][index] = self.evaluate_expression(value)
                         else:
@@ -3222,10 +3254,11 @@ class TRS80Simulator:
                     else:
                         self._error_sn(f"Array {array_name} not defined")
                 else:
-                    if var.endswith('$'):
-                        self.scalar_variables[var] = value.strip("'\"")
+                    # NEW: READ respects DEFINT/DEFSTR
+                    if self._resolve_var_kind(var) == 'S':
+                        self._set_scalar(var, value.strip("'\""))
                     else:
-                        self.scalar_variables[var] = self.evaluate_expression(value)
+                        self._set_scalar(var, self.evaluate_expression(value))
                 self.data_pointer += 1
                 self.debug_print(f"READ: {var} = {value}")
             else:
@@ -3235,10 +3268,174 @@ class TRS80Simulator:
         self.data_pointer = 0
         self.debug_print("RESTORE: Data pointer reset to 0")
 
+    # ------------------------------------------------------------------
+    # NEW: DEFINT/DEFSNG/DEFDBL/DEFSTR — mirror JMR VariableEngine
+    # Storage keys: integer→NAME%, string→NAME$, single→NAME (bare).
+    # Bare NAME resolves via default_type_table; A% / A! / A$ stay distinct
+    # slots unless the default type makes bare NAME share that slot.
+    # ------------------------------------------------------------------
+    def _parse_var_type(self, name):
+        """Return (base_name, spelled_type|None). Spelled: I/F/S/D."""
+        name = (name or '').strip()
+        if not name:
+            return '', None
+        suf = name[-1]
+        if suf == '%':
+            return name[:-1], 'I'
+        if suf == '!':
+            return name[:-1], 'F'
+        if suf == '#':
+            return name[:-1], 'D'  # accepted as single (ROADMAP)
+        if suf == '$':
+            return name[:-1], 'S'
+        return name, None
+
+    def _resolve_var_kind(self, name):
+        """Resolved kind I/F/S — DEFDBL/# → F (JMR resolve_type)."""
+        base, spelled = self._parse_var_type(name)
+        if spelled is not None:
+            return 'F' if spelled == 'D' else spelled
+        if not base or not base[0].isalpha():
+            return 'F'
+        default = self.default_type_table[ord(base[0].upper()) - ord('A')]
+        return 'F' if default == 'D' else default
+
+    def _canonical_var_key(self, name):
+        """Storage key matching JMR (name0,name1,kind) in this dict model.
+
+        Integer→NAME%, string→NAME$, single→NAME!  (bare NAME is only an alias
+        for the default-type slot — never its own storage key).
+        """
+        base, _ = self._parse_var_type(name)
+        kind = self._resolve_var_kind(name)
+        if kind == 'S':
+            return base + '$'
+        if kind == 'I':
+            return base + '%'
+        return base + '!'  # single — distinct from A% / A$
+
+    def _set_default_type(self, first, last, type_code):
+        """DEFINT/DEFSNG/DEFDBL/DEFSTR for letters first..last inclusive."""
+        for letter in range(ord(first), ord(last) + 1):
+            idx = letter - ord('A')
+            if 0 <= idx < 26:
+                self.default_type_table[idx] = type_code
+        self._last_var_count = -1  # rebuild expression substitution cache
+
+    def _cint(self, value):
+        """JMR float_to_int(..., 'CINT'): floor toward -inf, int16 range."""
+        import math
+        try:
+            n = math.floor(float(value))
+        except (TypeError, ValueError):
+            n = 0
+        if n < -32768 or n > 32767:
+            self._raise_error(6, 'OV')
+            return 0
+        return int(n)
+
+    def _set_scalar(self, name, value):
+        """Assign with DEFINT coercion / DEFSTR string typing (JMR STORE)."""
+        key = self._canonical_var_key(name)
+        kind = self._resolve_var_kind(name)
+        base, _ = self._parse_var_type(name)
+        # A% / A! / A$ are distinct slots — no cross-deletes (JMR VariableEngine).
+        if kind == 'S':
+            if isinstance(value, str):
+                self.scalar_variables[key] = value
+            else:
+                self.scalar_variables[key] = str(value)
+        elif kind == 'I':
+            self.scalar_variables[key] = self._cint(value)
+        else:
+            self.scalar_variables[key] = value
+        self._last_var_count = -1
+        self._var_regex_cache.pop(key, None)
+        if base:
+            self._var_regex_cache.pop(base, None)
+            self._var_regex_cache.pop(base + '%', None)
+            self._var_regex_cache.pop(base + '!', None)
+            self._var_regex_cache.pop(base + '$', None)
+
+    def _get_scalar(self, name, default=0):
+        key = self._canonical_var_key(name)
+        if key in self.scalar_variables:
+            return self.scalar_variables[key]
+        return '' if self._resolve_var_kind(name) == 'S' else default
+
+    def _substitution_var_map(self):
+        """Keys for expression Stage 6, including bare aliases (JMR slots)."""
+        out = dict(self.scalar_variables)
+        for key, value in list(self.scalar_variables.items()):
+            if key.endswith('%'):
+                base, kind = key[:-1], 'I'
+            elif key.endswith('$'):
+                base, kind = key[:-1], 'S'
+            elif key.endswith('!'):
+                base, kind = key[:-1], 'F'
+                out[base + '#'] = value  # # accepted as single
+            else:
+                # legacy bare single key (pre NAME! storage)
+                base, kind = key, 'F'
+                out[base + '!'] = value
+                out[base + '#'] = value
+            # bare NAME aliases the default-type slot
+            if base and self._resolve_var_kind(base) == kind:
+                out[base] = value
+        return out
+
+    def _cmd_def_type(self, command, type_code):
+        """Parse DEFINT A-C,X  (JMR MicroOp.DEF_TYPE_RANGE + comma loop)."""
+        if not getattr(self, 'default_type_table', None) or len(self.default_type_table) != 26:
+            self.default_type_table = ['F'] * 26
+        rest = re.sub(r'^(DEFINT|DEFSNG|DEFDBL|DEFSTR)\s*', '', command, count=1).strip()
+        if not rest:
+            self._error_sn(command)
+            return
+        for part in rest.split(','):
+            part = part.strip().replace(' ', '').upper()
+            m = re.match(r'^([A-Z])(?:-([A-Z]))?$', part)
+            if not m:
+                self._error_sn(command)
+                return
+            first = m.group(1)
+            last = m.group(2) or first
+            self._set_default_type(first, last, type_code)
+        if self.debug_mode:
+            self.debug_print(f"{command.split()[0]} -> {rest}")
+
+    def _cmd_defint(self, command):
+        self._cmd_def_type(command, 'I')
+
+    def _cmd_defsng(self, command):
+        self._cmd_def_type(command, 'F')
+
+    def _cmd_defdbl(self, command):
+        # DEFDBL accepted as single precision (JMR ROADMAP deviation)
+        self._cmd_def_type(command, 'D')
+
+    def _cmd_defstr(self, command):
+        self._cmd_def_type(command, 'S')
+
+    def _cmd_clear(self, command):
+        """Program CLEAR — zero vars; keep DEFINT/DEFSNG/DEFDBL/DEFSTR table."""
+        self.scalar_variables = {}
+        self.array_variables = {}
+        self.array_dimensions = {}
+        self.user_functions = {}
+        self.for_loops = {}
+        self.gosub_stack = []
+        self.data_pointer = 0
+        self._last_rnd = 0
+        self._sorted_vars_cache = []
+        self._last_var_count = -1
+        self._var_regex_cache = {}
+        self._array_patterns = {}
+
     def _cmd_def(self, command):
         """DEF FNx(var) = expression"""
         import re as _re
-        m = _re.match(r'^DEF\s+FN([A-Z])\s*\(\s*([A-Z][A-Z0-9]*\$?)\s*\)\s*=\s*(.+)$', command)
+        m = _re.match(r'^DEF\s+FN([A-Z])\s*\(\s*([A-Z][A-Z0-9]*[%!#$]?)\s*\)\s*=\s*(.+)$', command)
         if m:
             letter = m.group(1)
             param = m.group(2)
@@ -3302,7 +3499,7 @@ class TRS80Simulator:
         'OR': ' or ',
         'AND': ' and ',
         'NOT': ' not ',
-        '<>': '!=',
+        # NEW: do NOT map <> → != (clashes with A! type suffix before =)
         '=': '==',
         '^': ' ** ',
     }
@@ -3339,6 +3536,11 @@ class TRS80Simulator:
         # Fast path for simple variable references
         if expr_stripped in self.scalar_variables:
             return self.scalar_variables[expr_stripped]
+        # NEW: bare name may resolve to typed slot (DEFINT A → A%)
+        if re.fullmatch(r'[A-Z][A-Z0-9]*[%!#$]?', expr_stripped):
+            key = self._canonical_var_key(expr_stripped)
+            if key in self.scalar_variables:
+                return self.scalar_variables[key]
 
         return self._eval_nested(expr)
 
@@ -3355,7 +3557,8 @@ class TRS80Simulator:
         NOT becomes: not X -> _bnot(X)
         """
         # 1. Wrap comparison operators with function calls
-        for op_str, func_name in [('>=', '_ge'), ('<=', '_le'), ('!=', '_ne'),
+        # NEW: <> is Level II not-equal (do not use != — clashes with A! type suffix)
+        for op_str, func_name in [('>=', '_ge'), ('<=', '_le'), ('<>', '_ne'),
                                    ('==', '_eq'), ('>', '_gt'), ('<', '_lt')]:
             while True:
                 pos = self._find_comp_op(expr, op_str)
@@ -3366,6 +3569,16 @@ class TRS80Simulator:
                 left = expr[left_start:pos].strip()
                 right = expr[pos + len(op_str):right_end].strip()
                 expr = expr[:left_start] + f"{func_name}({left},{right})" + expr[right_end:]
+        # NEW: leftover single = after typed A!=4 → 4=4 (keyword skipped = after !)
+        while True:
+            pos = self._find_comp_op(expr, '=')
+            if pos == -1:
+                break
+            left_start = self._scan_left_boundary(expr, pos)
+            right_end = self._scan_right_boundary(expr, pos + 1)
+            left = expr[left_start:pos].strip()
+            right = expr[pos + 1:right_end].strip()
+            expr = expr[:left_start] + f"_eq({left},{right})" + expr[right_end:]
         # 2. Replace 'not' with _bnot() for bitwise NOT
         expr = self._wrap_not_ops(expr)
         # 3. Replace AND/OR with bitwise _iand/_ior (AND first — higher precedence)
@@ -3388,10 +3601,22 @@ class TRS80Simulator:
                 if op_str == '>' and i + 1 < len(expr) and expr[i + 1] == '=':
                     i += 2
                     continue
-                # Don't match < if part of <=
-                if op_str == '<' and i + 1 < len(expr) and expr[i + 1] == '=':
+                # Don't match < if part of <= or <>
+                if op_str == '<' and i + 1 < len(expr) and expr[i + 1] in '=>':
                     i += 2
                     continue
+                # Don't match > if part of <>
+                if op_str == '>' and i > 0 and expr[i - 1] == '<':
+                    i += 1
+                    continue
+                # Don't match single = if part of == <= >= !=
+                if op_str == '=':
+                    if i > 0 and expr[i - 1] in '=<>!':
+                        i += 1
+                        continue
+                    if i + 1 < len(expr) and expr[i + 1] == '=':
+                        i += 2
+                        continue
                 return i
             i += 1
         return -1
@@ -3638,16 +3863,17 @@ class TRS80Simulator:
                 arg_val = self._eval_nested(arg_expr)
                 # Save, set, evaluate, restore parameter (try/finally for safety)
                 param = defn['param']
-                saved = self.scalar_variables.get(param)
-                had_param = param in self.scalar_variables
-                self.scalar_variables[param] = arg_val
+                param_key = self._canonical_var_key(param)
+                saved = self.scalar_variables.get(param_key)
+                had_param = param_key in self.scalar_variables
+                self._set_scalar(param, arg_val)
                 try:
                     result = self._eval_nested(defn['body'])
                 finally:
                     if had_param:
-                        self.scalar_variables[param] = saved
-                    elif param in self.scalar_variables:
-                        del self.scalar_variables[param]
+                        self.scalar_variables[param_key] = saved
+                    elif param_key in self.scalar_variables:
+                        del self.scalar_variables[param_key]
                 # Wrap negative results in parens so -3**2 isn't mis-parsed
                 sv = str(result)
                 replacement = f"({sv})" if isinstance(result, (int, float)) and result < 0 else sv
@@ -3710,10 +3936,11 @@ class TRS80Simulator:
         # Skip entirely for pure-numeric expressions (no alpha chars)
         has_alpha = any(c.isalpha() for c in expr)
         if has_alpha and self.scalar_variables:
-            # Optimization 5: Cache sorted_vars, only re-sort when variable count changes
-            var_count = len(self.scalar_variables)
+            # NEW: include bare aliases for DEFINT/DEFSTR typed slots
+            sub_map = self._substitution_var_map()
+            var_count = len(sub_map)
             if var_count != self._last_var_count:
-                self._sorted_vars_cache = sorted(self.scalar_variables.keys(), key=len, reverse=True)
+                self._sorted_vars_cache = sorted(sub_map.keys(), key=len, reverse=True)
                 self._last_var_count = var_count
             sorted_vars = self._sorted_vars_cache
             quote_map = self._build_quote_map(expr)
@@ -3726,9 +3953,9 @@ class TRS80Simulator:
                 part_quote_map = self._build_quote_map(parts[i])
 
                 for var in sorted_vars:
-                    if var not in self.scalar_variables:
+                    if var not in sub_map:
                         continue
-                    value = self.scalar_variables[var]
+                    value = sub_map[var]
                     new_parts = []
                     last_end = 0
                     # Use cached compiled regex per variable name
@@ -3736,7 +3963,12 @@ class TRS80Simulator:
                         if var.upper() in self._PROTECTED_FUNCTIONS:
                             pattern = rf'\b{re.escape(var)}\b(?!\()'
                         else:
-                            pattern = re.escape(var) if var.endswith('$') else r'\b' + re.escape(var) + r'\b'
+                            # % ! $ # are non-word — same as $: no \b on the right
+                            if var[-1:] in '%$!#':
+                                pattern = re.escape(var)
+                            else:
+                                # NEW: (?![%!#$]) so bare A does not match A inside A%
+                                pattern = r'\b' + re.escape(var) + r'\b(?![%!#$])'
                         self._var_regex_cache[var] = re.compile(pattern)
                     var_re = self._var_regex_cache[var]
 
@@ -3744,7 +3976,7 @@ class TRS80Simulator:
                         s, e = match.span()
                         if not (s < len(part_quote_map) and part_quote_map[s]):
                             new_parts.append(parts[i][last_end:s])
-                            if var.endswith('$'):
+                            if var.endswith('$') or isinstance(value, str):
                                 safe = str(value).replace("'", "\\'")
                                 replacement = f"'{safe}'"
                                 if i + 2 < len(parts) and parts[i+1] == '+':
@@ -3783,8 +4015,8 @@ class TRS80Simulator:
         except Exception as e:
             if self.debug_mode:
                 self.debug_print(f"Evaluation failed: {e}", 'error')
-            # Fall back: treat as a string literal (unquote)
-            return expr.strip("'\"")
+            # NEW: return 0 (not the expr string) so IF cannot false-PASS on bad A% eval
+            return 0
 
     # ============================================================
     #  SECTION: Built-in Functions (dispatch table)
@@ -4112,7 +4344,7 @@ class TRS80Simulator:
         if line.endswith('\r'):
             line = line[:-1]
         self._seq_chan['pos'] = pos
-        self.scalar_variables[var_name] = line
+        self._set_scalar(var_name, line)
 
     # ============================================================
     #  SECTION: Graphics (SET/RESET/POINT)
@@ -4530,9 +4762,10 @@ class TRS80Simulator:
             self.run_program()
             return  # Don't show prompt here - it will be shown when program ends
         
-        elif cmd == "LIST":
+        elif cmd in ("LIST", "LLIST"):
+            # NEW: LIST ranges match JMR FM — LIST / LIST n / LIST n- / LIST n-m / LIST -m
+            # LLIST is the Level II printer alias; here it lists to the screen.
             if len(cmd_parts) > 1:
-                # Handle LIST with line numbers
                 self.list_program_range(cmd_parts[1])
             else:
                 self.list_program()
@@ -4547,12 +4780,14 @@ class TRS80Simulator:
             self.set_screen_focus()
         
         elif cmd == "CLEAR":
+            # Level II: CLEAR zeros vars but keeps DEFINT… table
             self.scalar_variables = {}
             self.array_variables = {}
             self.array_dimensions = {}
             self.for_loops = {}
             self.gosub_stack = []
             self.data_pointer = 0
+            self._last_var_count = -1
             self.print_to_screen("VARIABLES CLEARED")
         
         elif cmd == "CONT":
@@ -4560,14 +4795,16 @@ class TRS80Simulator:
                 self.disable_immediate_mode()
                 self.stop_program()  # This toggles the pause state
         
-        elif cmd == "LOAD":
+        elif cmd in ("LOAD", "CLOAD"):
+            # NEW: CLOAD = LOAD alias (computer file dialog — not µSD/disk)
             self.disable_immediate_mode()
             self.load_program()
             self.enable_immediate_mode()
             self.set_screen_focus()
             return  # Don't show another prompt
         
-        elif cmd == "SAVE":
+        elif cmd in ("SAVE", "CSAVE"):
+            # NEW: CSAVE = SAVE alias (computer file dialog — not µSD/disk)
             self.disable_immediate_mode()
             self.save_program()
             self.enable_immediate_mode()
@@ -4592,27 +4829,37 @@ class TRS80Simulator:
                 self.print_to_screen(f"?{str(e)}")
 
     def list_program_range(self, range_spec):
-        """List specific line numbers or ranges"""
+        """LIST n / LIST n-m / LIST n- / LIST -m — same forms as JMR FM _list()."""
         # Always sync from input area first
         current_program = self.input_area.get(1.0, tk.END).strip().split('\n')
         self.stored_program = self._sort_program_lines(current_program)
         
         try:
-            if '-' in range_spec:
-                start, end = map(float, range_spec.split('-'))
-                lines = [line for line in self.stored_program 
-                        if start <= float(line.split()[0]) <= end]
+            first, last = 0.0, float(0xFFFF)
+            spec = str(range_spec).replace(' ', '')
+            if not spec:
+                self.list_program()
+                return
+            if '-' in spec:
+                a, b = spec.split('-', 1)
+                if a == '' and b == '':
+                    raise ValueError('bad range')
+                if a != '':
+                    first = float(a)
+                if b != '':
+                    last = float(b)
+                # LIST n- → last stays 0xFFFF; LIST -m → first stays 0
             else:
-                target = float(range_spec)
-                lines = [line for line in self.stored_program 
-                        if float(line.split()[0]) == target]
+                first = last = float(spec)
+            lines = [line for line in self.stored_program
+                     if line.strip() and first <= float(line.split()[0]) <= last]
             
             if lines:
                 for line in lines:
                     self.print_to_screen(line)
             else:
                 self.print_to_screen("NO SUCH LINE")
-        except:
+        except Exception:
             self.print_to_screen("?SYNTAX ERROR")
 
     def delete_lines(self, range_spec):
@@ -4643,14 +4890,16 @@ TRS-80 BASIC Simulator Help
 
 Immediate Mode Commands (type directly on green screen):
 - RUN - Run the program
-- LIST [line#] or [line#-line#] - List program
+- LIST [line#] or [line#-line#] - List program (also LIST n- / LIST -m)
+- LLIST - Same as LIST (printer alias → screen here)
 - NEW - Clear program memory
-- CLEAR - Clear variables
+- CLEAR - Clear variables (keeps DEFINT/DEFSNG/DEFDBL/DEFSTR)
 - CONT - Continue after STOP
-- LOAD - Load program from file
-- SAVE - Save program to file
+- LOAD / CLOAD - Load program from file (computer dialog)
+- SAVE / CSAVE - Save program to file (computer dialog)
 - CLS - Clear screen
 - DELETE line# or line#-line# - Delete lines
+- DEFINT/DEFSNG/DEFDBL/DEFSTR letter[-letter][,…] - default types (DEFDBL→single)
 
 Program Commands:
 - PRINT "text" or PRINT expression [, expression...]

@@ -166,7 +166,7 @@ const KEYWORD_REPLACEMENTS = {
     'OR':  ' | ',
     'AND': ' & ',
     'NOT': ' not ',
-    '<>':  '!=',
+    // NEW: do NOT map <> → != (clashes with A! type suffix before =)
     '=':   '==',
     '^':   '**',
 };
@@ -368,7 +368,7 @@ _compileRegexPatterns() {
     this._re.erlBare      = /\bERL\b/g;
     this._re.stringSplit  = /("(?:[^"\\]|\\.)*"|'(?:[^'\\]|\\.)*')/;
     this._re.inkey        = /\bINKEY\$/;
-    this._re.allKeywords  = /\bRND\b(?!\()|\bMOD\b|\bOR\b|\bAND\b|\bNOT\b|<>|(?<![=<>])=(?!=)|\^/g;
+    this._re.allKeywords  = /\bRND\b(?!\()|\bMOD\b|\bOR\b|\bAND\b|\bNOT\b|(?<![!<>=])=(?!=)|\^/g;
 }
 
 _resetScreenArrays() {
@@ -2946,7 +2946,8 @@ _evalNested(expr) {
 //  TRS-80 Comparison & Logic Wrapping
 // ------------------------------------------------------------------
 _wrapTrs80Logic(expr) {
-    for (const [opStr, funcName] of [['>=','_ge'],['<=','_le'],['!=','_ne'],['==','_eq'],['>','_gt'],['<','_lt']]) {
+    // NEW: <> is Level II not-equal (do not use != — clashes with A! type suffix)
+    for (const [opStr, funcName] of [['>=','_ge'],['<=','_le'],['<>','_ne'],['==','_eq'],['>','_gt'],['<','_lt']]) {
         while (true) {
             const pos = this._findCompOp(expr, opStr);
             if (pos === -1) break;
@@ -2956,6 +2957,16 @@ _wrapTrs80Logic(expr) {
             const right = expr.substring(pos + opStr.length, rightEnd).trim();
             expr = expr.substring(0, leftStart) + `${funcName}(${left},${right})` + expr.substring(rightEnd);
         }
+    }
+    // NEW: leftover single = after typed A!=4 → 4=4 (keyword skipped = after !)
+    while (true) {
+        const pos = this._findCompOp(expr, '=');
+        if (pos === -1) break;
+        const leftStart = this._scanLeftBoundary(expr, pos);
+        const rightEnd  = this._scanRightBoundary(expr, pos + 1);
+        const left  = expr.substring(leftStart, pos).trim();
+        const right = expr.substring(pos + 1, rightEnd).trim();
+        expr = expr.substring(0, leftStart) + `_eq(${left},${right})` + expr.substring(rightEnd);
     }
     expr = this._wrapNotOps(expr);
     return expr;
@@ -2970,7 +2981,15 @@ _findCompOp(expr, opStr) {
         if (expr[i] === "'" && !inDouble) { inSingle = !inSingle; i++; continue; }
         if (!inDouble && !inSingle && expr.substring(i, i + opLen) === opStr) {
             if (opStr === '>' && i + 1 < expr.length && expr[i + 1] === '=') { i += 2; continue; }
-            if (opStr === '<' && i + 1 < expr.length && expr[i + 1] === '=') { i += 2; continue; }
+            // Skip < in <= and <>
+            if (opStr === '<' && i + 1 < expr.length && (expr[i + 1] === '=' || expr[i + 1] === '>')) { i += 2; continue; }
+            // Skip > that is the second char of <>
+            if (opStr === '>' && i > 0 && expr[i - 1] === '<') { i += 1; continue; }
+            // Don't match single = if part of == <= >= != or A!=
+            if (opStr === '=') {
+                if (i > 0 && '=<!>'.includes(expr[i - 1])) { i += 1; continue; }
+                if (i + 1 < expr.length && expr[i + 1] === '=') { i += 2; continue; }
+            }
             return i;
         }
         i++;
