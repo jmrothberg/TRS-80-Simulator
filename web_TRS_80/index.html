@@ -990,13 +990,12 @@ _handleInputReturn() {
         }
     }
 
-    // Do not scroll on INPUT completion — same as TRS80_March_30_26.py (full-screen HELP/CLS).
+    // NEW: advance like PRINT newline — scroll when on last row so OK / next
+    // INPUT ">" do not overwrite ">TAKE FOOD" → "OKAKE FOOD".
     this.cursorCol = 0;
-    if (this.cursorRow < ROWS - 1) {
-        this.cursorRow++;
-    } else {
-        this.cursorRow = ROWS - 1;
-    }
+    this.cursorRow++;
+    if (this.cursorRow >= ROWS) this._scrollScreenUp();
+    this.updateCursorDisplay();
 
     this.waitingForInput = false;
     this.inputVariables = null;
@@ -2127,8 +2126,9 @@ _cmdClear(command) {
 _cmdInput(command) {
     const { prompt, variables } = this._parseInputCommand(command);
     if (!variables.length) return;
+    // Level II / JMR: optional prompt string, then always "? "
     if (prompt != null) this.printToScreen(prompt, '');
-    else this.printToScreen('? ', '');
+    this.printToScreen('? ', '');
     this.waitingForInput = true;
     this.inputVariables = variables;
     this.inputStartRow = this.cursorRow;
