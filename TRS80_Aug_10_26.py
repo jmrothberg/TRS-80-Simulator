@@ -48,6 +48,8 @@
 #                  LIST n-/LIST -m; LLIST/CLOAD/CSAVE aliases (computer dialog)
 #    Aug 10 2026 - INPUT matches web: always "? " after prompt; Enter advances
 #                  like PRINT newline (scroll on last row — no OKAKE FOOD)
+#    Aug 10 2026 - OPEN "I": if not in RAM _seq_files, load from host disk
+#                  (program dir / Basic_Code_Examples / cwd) so ADVENT CAVE.DAT works
 #
 # ---------------------------------------------------------------------------
 #  HOW THE INTERPRETER WORKS  (read this before diving into the code)
@@ -332,6 +334,8 @@ class TRS80Simulator:
         self._pending_goto = 0
         self._seq_files = {}
         self._seq_chan = None
+        # NEW: directory of last LOADed .bas — OPEN "I" looks here for CAVE.DAT etc.
+        self._program_dir = None
         self.last_key_pressed = None
         self.tape_file = None
         self.tape_data = []
@@ -4043,7 +4047,7 @@ class TRS80Simulator:
             'SGN': lambda v, ie: -1 if float(v) < 0 else (1 if float(v) > 0 else 0),
             'ABS': lambda v, ie: abs(float(v)),
             'FIX': lambda v, ie: math.trunc(float(v)),
-            'VAL': lambda v, ie: (lambda s: 0 if s == '' else (int(float(s)) if float(s) == int(float(s)) else float(s)))(str(v).strip("'\"")),
+            'VAL': self._func_val,
             'RND': self._func_rnd,
             'ASC': lambda v, ie: ord(str(v).strip("'\"")[0]) if str(v).strip("'\"") else 0,
             'PEEK': lambda v, ie: self.peek(int(v)),
@@ -4058,6 +4062,21 @@ class TRS80Simulator:
             'INSTR': self._func_instr,
             'FRE': self._func_fre,
         }
+
+    def _func_val(self, inner_value, inner_expr):
+        # Level II VAL: only the leading number counts; alphanumeric remainder is
+        # ignored (manual: VAL("100 DOLLARS")=100). float("8 9") must NOT raise —
+        # ADVENT PLC lines store "loc flags" in B$ and do VAL(B$) for the location.
+        s = str(inner_value).strip("'\"")
+        if not s:
+            return 0
+        m = re.match(r'\s*([+-]?(?:\d+\.?\d*|\.\d+)(?:[Ee][+-]?\d+)?)', s)
+        if not m:
+            return 0
+        n = float(m.group(1))
+        if n == int(n):
+            return int(n)
+        return n
 
     def _func_rnd(self, inner_value, inner_expr):
         """Level II (manual page 48): RND(0) -> float 0.0..0.9999, RND(n) -> integer
@@ -4275,6 +4294,56 @@ class TRS80Simulator:
             return self._line_numbers[self._error_line_index]
         return int(float(self.evaluate_expression(rest)))
 
+    def _resolve_seq_input_file(self, name):
+        """Load OPEN \"I\" text from host disk into _seq_files if missing.
+
+        Search order (case-insensitive basename match): last LOADed .bas dir,
+        Basic_Code_Examples next to this script / cwd, then cwd. Mirrors real
+        Level II disk OPEN used by ADVENT.bas for CAVE.DAT.
+        """
+        if name in self._seq_files:
+            return True
+        candidates = []
+        if self._program_dir:
+            candidates.append(self._program_dir)
+        here = os.path.dirname(os.path.abspath(__file__))
+        candidates.append(os.path.join(here, 'Basic_Code_Examples'))
+        candidates.append(os.path.join(os.getcwd(), 'Basic_Code_Examples'))
+        candidates.append(os.getcwd())
+        candidates.append(here)
+        want = name.upper()
+        tried = set()
+        for folder in candidates:
+            if not folder or folder in tried:
+                continue
+            tried.add(folder)
+            if not os.path.isdir(folder):
+                continue
+            # Exact name first, then case-insensitive scan
+            direct = os.path.join(folder, name)
+            paths = [direct]
+            try:
+                for fn in os.listdir(folder):
+                    if fn.upper() == want:
+                        paths.append(os.path.join(folder, fn))
+            except OSError:
+                pass
+            for path in paths:
+                if not os.path.isfile(path):
+                    continue
+                try:
+                    with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                        data = f.read()
+                    if data.startswith('\ufeff'):
+                        data = data[1:]
+                    self._seq_files[name] = data
+                    if self.debug_mode:
+                        self.debug_print(f"OPEN I loaded host file: {path}")
+                    return True
+                except OSError:
+                    continue
+        return False
+
     def _cmd_open(self, command):
         arg = command[4:].strip()
         parts = self._split_all_top_level_commas(arg)
@@ -4290,7 +4359,8 @@ class TRS80Simulator:
             self._seq_files[name] = ''
             self._seq_chan = {'mode': 'O', 'name': name, 'data': '', 'pos': 0}
         else:
-            if name not in self._seq_files:
+            # NEW: host-disk fallback when not already in RAM (ADVENT CAVE.DAT)
+            if name not in self._seq_files and not self._resolve_seq_input_file(name):
                 self._raise_error(4, 'FF')
                 return
             self._seq_chan = {
@@ -4503,6 +4573,8 @@ class TRS80Simulator:
                 self.input_area.insert(tk.END, program_text)
                 # Update stored_program from loaded content
                 self.stored_program = program_lines
+                # NEW: remember folder so OPEN "I","CAVE.DAT" finds sibling data files
+                self._program_dir = os.path.dirname(os.path.abspath(filename))
         # turn on the RUN button and Step button list
         self.run_button.config(state=tk.NORMAL)
         self.step_button.config(state=tk.NORMAL)
