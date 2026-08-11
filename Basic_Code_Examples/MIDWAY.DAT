@@ -1,0 +1,87 @@
+MIDWAY CAMPAIGN — HOW TO PLAY
+{PAGE}
+THE STORY
+June 1942. You command the U.S. Navy at Midway.
+Japan is trying to take the island. Stop them.
+
+Your forces:
+  TF-16  Enterprise (E) and Hornet (H)
+  TF-17  Yorktown (Y)
+  Midway Island (M) with its own planes
+
+Time runs in ticks (about 30-60 minutes each).
+Type a command, then press ENTER, or type 1-9 to
+wait that many hours.
+{PAGE}
+THE SCREEN
+Top line: day and clock.
+Second line: damage totals for Japan, U.S., Midway.
+
+Map (rows below the header):
+  1 = Japanese carriers (when spotted)
+  2 = Japanese transports
+  3 = Japanese cruisers
+  4 = Task Force 17
+  5 = Task Force 16
+  6 = Midway Island
+  * = a force that has been spotted
+
+Right side: headings (HDG) and contacts.
+  Heading 0=N  90=E  180=S  270=W
+  Contact CV/TT/CA = identified; ?? = seen but not ID'd
+
+Deck line (above the prompt):
+  ENT/HOR/YOR/MID then C F S T counts
+  C=CAP fighters  F=F4F ready  S=SBD  T=TBD
+  Damage: under 60=OK, 60+=disabled, 100=sunk
+{PAGE}
+COMMANDS (type these at the CMD prompt)
+  T   Set a task-force course
+  A   Arm a strike on a carrier deck
+  L   Launch that strike at a spotted target
+  CA  Put F4F fighters on Combat Air Patrol
+  CL  Clear the flight deck (return planes to ready)
+  1-9 Wait that many hours (time passes, scouts, fights)
+  ENTER  Wait one short tick (0 hours)
+  ? or H  Show this help again
+
+Planes:
+  F4F = fighter (escort and CAP)
+  SBD = dive bomber (your best weapon)
+  TBD = torpedo bomber (hits are rare)
+{PAGE}
+HOW TO TYPE EACH COMMAND
+T — Course
+  Ask which TF: 16 or 17
+  Then course 0 to 360 degrees
+
+A — Arm a strike
+  Pick carrier: E H Y or M
+  Enter three numbers: F4F,SBD,TBD
+  Example: 10,21,0
+  SBDs need about one tick to finish arming
+  (S count shows 1000+ while still arming)
+
+CA — Combat Air Patrol
+  Pick carrier, then how many F4F for CAP
+  Keep at least 5 CAP on each carrier if you can
+
+CL — Clear deck
+  Pick carrier; armed planes go back to ready pools
+
+L — Launch
+  Pick carrier with a ready strike
+  If several targets, pick target number 1..N
+  Max launch range is about 200 nautical miles
+  No launches or landings at night
+{PAGE}
+STRATEGY
+* SBDs do the real damage; U.S. torpedoes rarely hit.
+* Keep CAP up — it stops Japanese strikes.
+* Launch soon after arming; bombs on deck can explode
+  if the ship is hit.
+* Steer toward contacts with T.
+* Scouts work from about 4 AM to 7 PM.
+* Win by sinking Akagi, Kaga, Soryu, and Hiryu,
+  and by protecting Midway Island.
+{END}
