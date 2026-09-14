@@ -1,0 +1,27 @@
+10 REM SOUND_T — standalone BEEP/SOUND jack test (V1.3)
+20 REM Board: headphones in Nexys AUD jack. PYTHON has no speaker (stub OK).
+30 CLS
+40 PRINT "SOUND TEST"
+50 PRINT "1) BEEP (880Hz ~250ms)"
+60 PRINT "2) 440Hz 500ms"
+70 PRINT "3) 880Hz 500ms"
+80 PRINT "4) rising blip"
+90 PRINT "Plug headphones, press ENTER"
+100 INPUT Z$
+110 PRINT "BEEP..."
+120 BEEP
+130 FOR I=1 TO 200:NEXT
+140 PRINT "440..."
+150 SOUND 440,500
+160 FOR I=1 TO 400:NEXT
+170 PRINT "880..."
+180 SOUND 880,500
+190 FOR I=1 TO 400:NEXT
+200 PRINT "BLIP..."
+210 SOUND 523,120
+220 SOUND 659,120
+230 SOUND 784,120
+240 REM V1.6.7: no SOUND 0 here — it would flush the queued blips
+250 PRINT "DONE — heard tones?"
+260 PRINT "LOAD SOUND_T again to repeat"
+270 END

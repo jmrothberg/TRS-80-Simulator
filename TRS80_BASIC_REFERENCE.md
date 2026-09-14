@@ -14,6 +14,7 @@ This guide describes **Radio Shack TRS-80 Model I Level II BASIC** as it was doc
 - [Expressions, operators, functions](#expressions-operators-and-functions)
 - [`DEF FN` (user-defined functions)](#def-fn-user-defined-functions)
 - [Graphics](#graphics)
+- [JMR color & sound (extensions)](#jmr-color--sound-extensions)
 - [Memory, PEEK/POKE, cassette](#memory-peekpoke-cassette)
 - [Limitations (Level II)](#limitations-level-ii)
 - [Syntax and style](#syntax-and-style)
@@ -25,7 +26,7 @@ This guide describes **Radio Shack TRS-80 Model I Level II BASIC** as it was doc
 ## How to use this document
 
 - **Default text** = **Model I Level II on real hardware** (manuals / common reference material).
-- **`Interpreter:`** = **only** applies to **this simulator** (`TRS80_July_27_26.py`, `web_TRS_80/index.html`, `docs/index.html`).
+- **`Interpreter:`** = **only** applies to **this simulator** (`TRS80_Aug_10_26.py`, `web_TRS_80/index.html`, `docs/index.html`).
 
 When behavior is unknown or ROM-dependent, that is stated.
 
@@ -58,10 +59,12 @@ When behavior is unknown or ROM-dependent, that is stated.
 | **`ON … GOSUB`** | **Yes** — part of **stock Model I Level II BASIC** (same family as **`ON … GOTO`**) | Was **missing in this simulator**; **now implemented** (`on_gosub` + stack, same as **`GOSUB`**) |
 | **`DELAY`** | Not a standard Level II statement keyword | **Extension**: `DELAY n` → pause ≈ **`n × 10` ms** (Tk `after` on desktop) |
 | **`SYSTEM`** | Enters machine monitor / exits to DOS depending on ROM and DOS | **Not implemented** (prints a message) |
-| **`PEEK(14400)`** | Keyboard **hardware** uses specific addresses; **14400** is used in games as a **keyboard-related** location | **Simulated**: last key **ASCII** or **0**; shares buffer with **`INKEY$`** (read **consumes**). Desktop pumps Tk **only when no key is buffered**, so empty tight loops stay cheap. **Not** cycle-accurate vs real latch. |
+| **`PEEK(14400)`** | Keyboard **hardware** uses specific addresses; **14400** is used in games as a **keyboard-related** location | **Simulated**: last key **ASCII** or **0**; shares buffer with **`INKEY$`** (read **consumes**). Desktop pumps Tk **only when no key is buffered**, so empty tight loops stay cheap. **Not** cycle-accurate vs real latch. **JMR FPGA arrows:** Left/Right/Up/Down → **17/18/19/20** (`CHR$(n)` / `PEEK`). |
 | **`RND`** | `RND(0)` / `RND(1)` style float; `RND(n)` integer **1..n** for **n > 1** (see manuals) | **Bare `RND`** (no `(`) is rewritten to a **new** random **float** each occurrence; **`RND(n)`** uses project rules in `_func_rnd` (float if `n≤1`, else integer **1..n**) |
 | **Tape** | `PRINT#` / `INPUT#` to cassette with hardware | **`PRINT#-1` / `INPUT#-1`** use an **in-memory “tape”** buffer |
 | **UI** | Physical keyboard | **Debug / variables / LLM** (desktop) — **not** on original hardware |
+| **Color / sound** | Model I Level II had **neither** | **JMR FPGA extensions** (same as `JMR-BASIC-FPGA-COMPUTER-1`): see [Graphics](#graphics) and [JMR color & sound](#jmr-color--sound-extensions) |
+| **`VERSION` / `HELP`** | ROM identity / none as console sheets | **V2.0** banner; **`VERSION`** prints banner + `W/ COLOR & SOUND`; **`HELP`** / **`HELP BASIC`** print cleaned FPGA console sheets |
 
 ### Interrupt — original machine vs this simulator
 
@@ -193,11 +196,41 @@ Only **`FN` + one letter** and a simple parameter list appear in classic manuals
 ## Graphics
 
 - **`SET(X,Y)`** / **`RESET(X,Y)`** — turn pixel on/off.
-- **`POINT(X,Y)`** — read pixel.
+- **`POINT(X,Y)`** — read pixel (−1 if lit, else 0).
 
 Level II BASIC uses **0-based** coordinates: **`X` (0–127)** and **`Y` (0–47)**. Upper-left is **`(0,0)`**; lower-right is **`(127,47)`**.
 
-**Interpreter:** Same as Level II — no 1-based offset.
+**Interpreter:** Same as Level II — no 1-based offset. Out-of-range coords raise **`?FC`** (no wrap).
+
+**Interpreter (JMR):** **`SET(X,Y,C)`** also paints color index **C** (0–15) into a parallel color plane; bare **`SET`** uses current FG. **`RESET`** clears the bit and writes current **BG** into the color plane. Read color with **`COLORAT(X,Y)`** — **`POINT`** stays Level II (lit/clear only).
+
+---
+
+## JMR color & sound (extensions)
+
+Stock Model I Level II had no color or sound keywords. This simulator matches the **JMR FPGA BASIC** Phase-1 surface so the same `.bas` files run on both.
+
+| Statement / function | Behavior |
+|----------------------|----------|
+| **`COLOR fg,bg`** | Set text ink / paper and default paint indices **0–15**. Does **not** clear the screen. |
+| **`SET(x,y)` / `SET(x,y,c)`** | Light pixel; paint color plane with FG or **c**. |
+| **`RESET(x,y)`** | Clear pixel; write **BG** into color plane. |
+| **`COLORAT(x,y)`** | Return color index **0–15**. |
+| **`CLS`** | Clear text + graphics + color plane to **current BG**; **FG/BG sticky**. |
+| **`NEW`** | Restores phosphor **FG=1, BG=0** and default 16-entry RGB444 palette. **`RUN`/`LOAD`** keep colors. |
+| **`SOUND freq[,ms]`** | Enqueue a square tone (non-blocking). **`SOUND 0`** stops and flushes the queue. |
+| **`BEEP`** | Enqueue **880 Hz / 250 ms**. |
+
+Palette / status via **`POKE`/`PEEK`** (decimal, no `&H`):
+
+| Addr | Role |
+|------|------|
+| **46240 / 46241** | FG / BG index |
+| **46256…** | Palette RGB444 (2 bytes per can 0–15): `rgb = R*256 + G*16 + B` |
+| **46292** | Sound ctrl: bit0=running, bit1=queue full, bit2=busy |
+| **46293 / 46294** | Pending note count (lo / hi bits) |
+
+Acceptance programs: **`Basic_Code_Examples/Color_T.bas`**, **`Sound_T.bas`**, **`level2_selftest.bas`**.
 
 ---
 
@@ -210,7 +243,7 @@ Level II BASIC uses **0-based** coordinates: **`X` (0–127)** and **`Y` (0–47
 | **15360–16383** | **Screen** character buffer (**1024** bytes = **64×16**) |
 | **14400** | Often used in **BASIC programs** as a **keyboard** / input cell in published listings |
 
-**Interpreter:** **`PEEK`** for **15360–16383** returns the **character code** at that cell. **`PEEK(14400)`** does **not** emulate Z80/keyboard hardware bit-for-bit; it exposes a **simplified** “last key” style value for game ports.
+**Interpreter:** **`PEEK`** for **15360–16383** returns the **character code** at that cell. **`PEEK(14400)`** does **not** emulate Z80/keyboard hardware bit-for-bit; it exposes a **simplified** “last key” style value for game ports. Arrow keys match **JMR FPGA**: Left=17, Right=18, Up=19, Down=20 (same for **`INKEY$`** via **`CHR$(n)`**).
 
 ### Cassette
 

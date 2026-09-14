@@ -48,6 +48,11 @@
 #                  LIST n-/LIST -m; LLIST/CLOAD/CSAVE aliases (computer dialog)
 #    Aug 10 2026 - INPUT matches web: always "? " after prompt; Enter advances
 #                  like PRINT newline (scroll on last row — no OKAKE FOOD)
+#    Sep 14 2026 - JMR FPGA parity: COLOR/COLORAT/colored SET, sticky CLS,
+#                  queued SOUND/BEEP + status PEEK, FOR same-var reclaim,
+#                  SET/POINT OOB ?FC, NEXT multi-var, RANDOM/CINT/CSNG/CDBL/POS,
+#                  CONT ?CN, RUN line (no CLS)
+#    Sep 14 2026 - V2.0 banner; HELP / HELP BASIC / VERSION (cleaned FPGA text)
 #    Aug 10 2026 - OPEN "I": if not in RAM _seq_files, load from host disk
 #                  (program dir / Basic_Code_Examples / cwd) so ADVENT CAVE.DAT works
 #
@@ -137,6 +142,98 @@ import os
 import math
 import time
 import platform
+import threading
+import wave
+import struct
+import tempfile
+import subprocess
+import shutil
+
+# JMR Phase-1 default 16× RGB444 palette (index 1 = phosphor green). Matches FPGA.
+_DEFAULT_PALETTE_RGB444 = (
+    0x000, 0x3F3, 0xF00, 0x0F0, 0x00F, 0xFF0, 0xF0F, 0x0FF,
+    0xFFF, 0xF80, 0x8F0, 0x08F, 0xF08, 0x888, 0xC00, 0x0C0,
+)
+# Color / sound MMIO (decimal) — same as JMR MEMORY_MAP B4A0/B4B0/B4D0
+_IO_COLOR_FG = 46240
+_IO_COLOR_BG = 46241
+_IO_PALETTE_BASE = 46256
+_IO_SOUND_FREQ_LO = 46288
+_IO_SOUND_FREQ_HI = 46289
+_IO_SOUND_DUR_LO = 46290
+_IO_SOUND_DUR_HI = 46291
+_IO_SOUND_CTRL = 46292
+_IO_SOUND_QCNT_LO = 46293
+_IO_SOUND_QCNT_HI = 46294
+_BEEP_FREQ_HZ = 880
+_BEEP_DURATION_MS = 250
+_SOUND_QUEUE_DEPTH = 512
+
+# Boot banner + VERSION (mirrors JMR FPGA; host simulator V2.0)
+BANNER = "JMR LEVEL II BASIC SIMULATOR V2.0"
+VERSION_FEATURES = "W/ COLOR & SOUND"
+# Cleaned console HELP from JMR FPGA (host: file dialog, no µSD DIR/REMOVE/EDIT)
+CONSOLE_HELP_LINES = (
+    "RUN NEW LIST CLS VERSION",
+    "LIST n / n-m / LIST -",
+    "LOAD SAVE  (file dialog)",
+    "HELP / HELP BASIC",
+    "ESC or Ctrl+C = BREAK",
+    "Arrows: L=17 R=18 U=19 D=20",
+    "=== COLOR + SOUND ===",
+    "COLOR fg,bg",
+    "  text ink + paper + SET default",
+    "  0..15  1=green 8=white 0=black",
+    "SET(x,y)     paint with fg",
+    "SET(x,y,c)   paint color c",
+    "RESET(x,y)   clear pixel to bg",
+    "POINT(x,y)   -1 lit / 0 clear",
+    "COLORAT(x,y) color index 0..15",
+    "SOUND hz,ms  tone; SOUND 0=stop",
+    "BEEP         short 880 Hz beep",
+    "NEW restores green on black",
+    "try: Color_T / Sound_T / PAC_CS",
+)
+CONSOLE_HELP_BASIC_LINES = (
+    "RUN / RUN line",
+    "NEW / LIST / CLS / REM",
+    "LOAD/SAVE (file dialog)",
+    "CLOAD/CSAVE = LOAD/SAVE",
+    "PRINT or ? / INPUT",
+    "PRINT@ / TAB / USING",
+    "IF c THEN / ELSE",
+    "FOR i=a TO b STEP s / NEXT",
+    "GOTO / GOSUB / RETURN",
+    "ON x GOTO/GOSUB",
+    "ON ERROR GOTO n",
+    "RESUME / RESUME NEXT / line",
+    "ERROR n",
+    "LET / END / STOP / CONT",
+    "READ / DATA / RESTORE",
+    "DIM a(n) / CLEAR / RANDOM",
+    "Names keep 2 chars: A, A1, AB",
+    "Type marks: % int  ! sng  $ str",
+    "# same as ! (no double)",
+    "No mark -> DEFINT/DEFSNG/DEFSTR",
+    "DEFINT/DEFSNG/DEFSTR A-Z",
+    "DEFDBL: same as DEFSNG",
+    "DEF FNname(x)=expr",
+    "SET / RESET / POKE / PEEK",
+    "POINT / COLORAT / COLOR",
+    "SOUND freq,ms / BEEP",
+    'OPEN "I/O",1,"f" / CLOSE',
+    "INPUT#1 / PRINT#1 / LINE INPUT#1",
+    "File#: channel 1 only",
+    "LEFT$ RIGHT$ MID$",
+    "CHR$ ASC STR$ VAL LEN",
+    "STRING$ INSTR INKEY$",
+    "ABS INT SGN FIX RND",
+    "SQR SIN COS TAN ATN",
+    "LOG EXP CINT CSNG CDBL",
+    "MEM FRE ERL ERR",
+    "AND OR NOT MOD",
+    "No AUTO USR LPRINT SYSTEM",
+)
 
 # SET/RESET ops before _flush_graphics (matches web_TRS_80 GRAPHICS_PENDING_BATCH — Mar 2026)
 _GRAPHICS_PENDING_BATCH = 256
@@ -326,6 +423,21 @@ class TRS80Simulator:
         self.for_loops = {}
         self.data_values = []
         self.data_pointer = 0
+        # NEW Sep 2026: JMR color plane + palette (FG=1 phosphor, BG=0)
+        self.color_fg = 1
+        self.color_bg = 0
+        self.palette = list(_DEFAULT_PALETTE_RGB444)
+        self.color_matrix = [[0 for _ in range(128)] for _ in range(48)]
+        # NEW Sep 2026: queued SOUND/BEEP (JMR sound_engine parity)
+        self._sound_queue = []
+        self._sound_running = False
+        self._sound_freq = 0
+        self._sound_dur = 0
+        self._sound_thread = None
+        self._sound_stop = threading.Event()
+        self._sound_lock = threading.Lock()
+        self._cont_armed = False  # CONT legal only after STOP/BREAK
+        self._banner_shown = False  # boot paints BANNER once before READY
         # NEW: Level II ON ERROR / ERR / ERL / RESUME + sequential files
         self.error_goto_line = 0
         self.err_value = 0
@@ -377,7 +489,7 @@ class TRS80Simulator:
         self.screen_height = 460
         self.taskbar_height = 20
         
-        self.new_program()
+        self.new_program(reset_colors=True)
         self.create_debug_window()
         self.replaced = False
         
@@ -532,12 +644,13 @@ class TRS80Simulator:
             y = self.cursor_row * self._char_h
 
             # Draw a solid block cursor like the original TRS-80 (ASCII 143 or solid block)
+            fg = self._fg_hex()
             self.cursor_canvas_item = self.screen.create_rectangle(
                 x, y,
                 x + self._char_w,
                 y + self._char_h,
-                fill="lime",
-                outline="lime",
+                fill=fg,
+                outline=fg,
                 tags="cursor"
             )
 
@@ -568,7 +681,7 @@ class TRS80Simulator:
         self._regex_cache['tab'] = re.compile(r'TAB\((\d+)\)')
         # ATN must be listed: else ATN(x) reaches eval() unnamed and _eval_nested falls back to returning the raw expr string,
         # which can be stored in arrays (e.g. F(0,4)=A after 12500) and later breaks SIN(F(I,4)) with float() on that string.
-        self._regex_cache['func_match'] = re.compile(r'(INT|SIN|COS|TAN|ATN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR|FRE)\(')
+        self._regex_cache['func_match'] = re.compile(r'(INT|SIN|COS|TAN|ATN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|COLORAT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR|FRE|CINT|CSNG|CDBL|POS|MEM)\(')
         self._regex_cache['on_error_goto'] = re.compile(r'ON\s+ERROR\s+GOTO\s+(.*)$', re.I)
         self._regex_cache['mem_bare'] = re.compile(r'\bMEM\b')
         self._regex_cache['err_bare'] = re.compile(r'\bERR\b')
@@ -1055,8 +1168,14 @@ class TRS80Simulator:
             if self.waiting_for_input:
                 pass  # INPUT mode — handle_input_key handles this
             # Only update if no key is currently stored (simulate keyboard buffer)
-            elif not self.last_key_pressed and event.char and not (event.state & 0x4):
-                self.last_key_pressed = event.char.upper()
+            elif not self.last_key_pressed and not (event.state & 0x4):
+                # NEW: JMR FPGA arrows → 17/18/19/20 for INKEY$/PEEK(14400)
+                # (Left/Right/Up/Down). Same as PAC_CS / Invaders WASD|arrows.
+                _arrows = {'Left': chr(17), 'Right': chr(18), 'Up': chr(19), 'Down': chr(20)}
+                if event.keysym in _arrows:
+                    self.last_key_pressed = _arrows[event.keysym]
+                elif event.char:
+                    self.last_key_pressed = event.char.upper()
         elif self.immediate_mode and not self.program_running and event.widget == self.screen:
             self.handle_immediate_mode_key(event)
     
@@ -1154,7 +1273,7 @@ class TRS80Simulator:
                     self.command_buffer += uc
                     x = self.cursor_col * self._char_w
                     y = self.cursor_row * self._char_h
-                    self.screen.create_text(x, y, text=uc, font=self._screen_font, fill="lime", anchor="nw",
+                    self.screen.create_text(x, y, text=uc, font=self._screen_font, fill=self._fg_hex(), anchor="nw",
                         tags=(f"c{self.cursor_row}_{self.cursor_col}", self.CANVAS_TEXT_LAYER_TAG))
                     self.screen_content[self.cursor_row][self.cursor_col] = uc
                     self.cursor_col += 1
@@ -1254,6 +1373,9 @@ class TRS80Simulator:
         self.screen_content = self.screen_content[1:] + [[' ' for _ in range(64)]]
         self.cursor_row = 15
         self.pixel_matrix = self.pixel_matrix[3:] + [[0 for _ in range(128)] for _ in range(3)]
+        # NEW: scroll color plane with graphics (JMR video_engine scroll)
+        bg = self.color_bg & 0xF
+        self.color_matrix = self.color_matrix[3:] + [[bg for _ in range(128)] for _ in range(3)]
         # O(active) set-shift instead of O(6144) full scan
         self._active_pixels = {(x, y - 3) for x, y in self._active_pixels if y >= 3}
         self.redraw_screen()
@@ -1276,6 +1398,7 @@ class TRS80Simulator:
         self.data_pointer = 0
         self.data_values = []
         self.last_key_pressed = None
+        self._cont_armed = False
         self.print_to_screen("VARIABLES CLEARED")
 
     def clear_memory_button_cmd(self):
@@ -1284,7 +1407,7 @@ class TRS80Simulator:
             self.program_running = False
             self.program_paused = False
             self.stop_button.config(text="DISABLED", state=tk.DISABLED)
-        self.new_program()
+        self.new_program(reset_colors=True)
         self.stored_program = []
         self.input_area.delete(1.0, tk.END)
         self.enable_immediate_mode()
@@ -1298,6 +1421,13 @@ class TRS80Simulator:
         self._gfx_pixel_item_ids.clear()
         self.screen_content = [[' ' for _ in range(64)] for _ in range(16)]
         self.pixel_matrix = [[0 for _ in range(128)] for _ in range(48)]
+        # NEW: CLS clears color plane to current BG; FG/BG sticky (JMR)
+        bg = self.color_bg & 0xF
+        self.color_matrix = [[bg for _ in range(128)] for _ in range(48)]
+        try:
+            self.screen.configure(bg=self._bg_hex())
+        except Exception:
+            pass
         self._active_pixels = set()
         self.cursor_row = 0
         self.cursor_col = 0
@@ -1306,11 +1436,13 @@ class TRS80Simulator:
         self._pending_graphics = []
     
 
-    def new_program(self):
+    def new_program(self, reset_colors=False):
         """Reset all interpreter state for a fresh program.
 
         Clears variables, loop stacks, display, and the pre-parsed line
         arrays.  Called by RUN (before re-parsing), NEW, and on startup.
+        NEW/cold boot: reset_colors=True restores FG=1 BG=0 + default palette.
+        RUN/LOAD: colors stay sticky (JMR).
         """
         self.scalar_variables = {}
         self.array_variables = {}
@@ -1333,6 +1465,7 @@ class TRS80Simulator:
         self._error_line_index = 0
         self._pending_goto = 0
         self._seq_chan = None
+        self._cont_armed = False
         # Optimization 2: Pre-parsed line number/command arrays
         self._line_numbers = []
         self._line_commands = []
@@ -1351,6 +1484,10 @@ class TRS80Simulator:
         self.cursor_col = 0
         self.tape_file = None
         self.tape_pointer = 0
+
+        # NEW: only NEW/cold reset restores phosphor FG/BG (JMR)
+        if reset_colors:
+            self._reset_color_defaults()
         
         # Clear the screen and reset cursor position
         self.clear_screen()
@@ -1404,17 +1541,19 @@ class TRS80Simulator:
 
         screen = self.screen
         font = self._screen_font
+        fg = self._fg_hex()
+        bg = self._bg_hex()
         for x, y, char, row, col in chars_to_draw:
             tag = f"c{row}_{col}"
             items = screen.find_withtag(tag)
             if items:
-                screen.itemconfigure(items[0], text=char)
+                screen.itemconfigure(items[0], text=char, fill=fg)
             else:
                 screen.create_rectangle(x, y, x + char_w, y + char_h,
-                    fill="black", outline="black")
+                    fill=bg, outline=bg)
                 if char != ' ':
                     screen.create_text(x, y, text=char,
-                        font=font, fill="lime", anchor="nw",
+                        font=font, fill=fg, anchor="nw",
                         tags=(tag, self.CANVAS_TEXT_LAYER_TAG))
 
         self.update_cursor_display()
@@ -1423,26 +1562,32 @@ class TRS80Simulator:
     def redraw_screen(self):
         self.screen.delete("all")
         self._gfx_pixel_item_ids.clear()
+        try:
+            self.screen.configure(bg=self._bg_hex())
+        except Exception:
+            pass
         ps = self.pixel_size
-        # Graphics first, text on top
+        # Graphics first, text on top — use color plane for lit pixels
         for x, y in self._active_pixels:
+            fill = self._palette_hex(self.color_matrix[y][x])
             kid = self.screen.create_rectangle(
                 x * ps, y * ps,
                 (x + 1) * ps, (y + 1) * ps,
-                fill="lime", outline="lime",
+                fill=fill, outline=fill,
                 tags=f"p{x}_{y}"
             )
             self._gfx_pixel_item_ids[(x, y)] = kid
         char_w = self._char_w
         char_h = self._char_h
         font = self._screen_font
+        fg = self._fg_hex()
         for row in range(16):
             for col in range(64):
                 char = self.screen_content[row][col]
                 if char != ' ':
                     tag = f"c{row}_{col}"
                     self.screen.create_text(col * char_w, row * char_h, text=char,
-                        font=font, fill="lime", anchor="nw",
+                        font=font, fill=fg, anchor="nw",
                         tags=(tag, self.CANVAS_TEXT_LAYER_TAG))
 
     
@@ -1487,7 +1632,7 @@ class TRS80Simulator:
         if old:
             self.screen.itemconfigure(old[0], text=uc)
         else:
-            self.screen.create_text(x, y, text=uc, font=self._screen_font, fill="lime", anchor="nw",
+            self.screen.create_text(x, y, text=uc, font=self._screen_font, fill=self._fg_hex(), anchor="nw",
                 tags=(tag, self.CANVAS_TEXT_LAYER_TAG))
 
         self.screen_content[self.cursor_row][self.cursor_col] = uc
@@ -2391,6 +2536,42 @@ class TRS80Simulator:
     def _error_rg(self):
         self._raise_error(3, 'RG')
 
+    def _error_cn(self):
+        self._raise_error(17, 'CN')
+
+    # NEW Sep 2026: JMR color/sound helpers (palette RGB444 → CSS/Tk hex)
+    def _reset_color_defaults(self):
+        """NEW/cold: phosphor FG=1, BG=0, default 16-can palette."""
+        self.color_fg = 1
+        self.color_bg = 0
+        self.palette = list(_DEFAULT_PALETTE_RGB444)
+
+    def _palette_rgb888(self, index):
+        rgb = self.palette[index & 0xF]
+        r4 = (rgb >> 8) & 0xF
+        g4 = (rgb >> 4) & 0xF
+        b4 = rgb & 0xF
+        return (r4 * 17, g4 * 17, b4 * 17)
+
+    def _palette_hex(self, index):
+        r, g, b = self._palette_rgb888(index)
+        return f'#{r:02x}{g:02x}{b:02x}'
+
+    def _fg_hex(self):
+        return self._palette_hex(self.color_fg)
+
+    def _bg_hex(self):
+        return self._palette_hex(self.color_bg)
+
+    def _drop_for_frame(self, var):
+        """JMR/Level II: re-FOR same var truncates stack at that frame (drops inners)."""
+        if var not in self.for_loops:
+            return
+        keys = list(self.for_loops.keys())
+        idx = keys.index(var)
+        for k in keys[idx:]:
+            del self.for_loops[k]
+
     # ============================================================
     #  SECTION: Interpreter Core — Command Dispatch
     #  _command_handlers maps keyword strings to _cmd_* methods:
@@ -2438,6 +2619,13 @@ class TRS80Simulator:
             'RESUME': self._cmd_resume,
             'OPEN': self._cmd_open,
             'CLOSE': self._cmd_close,
+            # NEW Sep 2026: JMR COLOR / SOUND / RANDOM / CONT / RUN line
+            'COLOR': self._cmd_color,
+            'SOUND': self._cmd_sound,
+            'BEEP': self._cmd_beep,
+            'RANDOM': self._cmd_random,
+            'CONT': self._cmd_cont,
+            'RUN': self._cmd_run_line,
         }
 
     def execute_command(self, command, cmd_word=None):
@@ -2765,13 +2953,16 @@ class TRS80Simulator:
                 paren_start = command.index('(')
                 paren_end = command.rindex(')')  # last ')' — handles nested parens
                 coords = command[paren_start+1:paren_end]
-                x_str, y_str = self._split_top_level_comma(coords)
-                if y_str is not None:
-                    # Level II BASIC: SET/RESET use 0..127, 0..47 (manual: upper-left=(0,0)).
-                    x = int(self.evaluate_expression(x_str.strip()))
-                    y = int(self.evaluate_expression(y_str.strip()))
+                # NEW: SET(x,y) or SET(x,y,c) — optional color (JMR)
+                parts = self._split_all_top_level_commas(coords)
+                if len(parts) >= 2:
+                    x = int(self.evaluate_expression(parts[0].strip()))
+                    y = int(self.evaluate_expression(parts[1].strip()))
+                    color = None
+                    if cmd_type == 'SET' and len(parts) >= 3:
+                        color = int(self.evaluate_expression(parts[2].strip())) & 0xF
                     if cmd_type == 'SET':
-                        self.set_pixel(x, y)
+                        self.set_pixel(x, y, color)
                     else:
                         self.reset_pixel(x, y)
                 else:
@@ -2782,7 +2973,6 @@ class TRS80Simulator:
             match = self._regex_cache['set_reset'].match(command)
             if match:
                 cmd_type, x_expr, y_expr = match.groups()
-                # Level II BASIC: SET/RESET use 0..127, 0..47.
                 x = int(self.evaluate_expression(x_expr))
                 y = int(self.evaluate_expression(y_expr))
                 if cmd_type == 'SET':
@@ -2797,6 +2987,75 @@ class TRS80Simulator:
         self.clear_screen()
         self.cursor_row = 0
         self.cursor_col = 0
+
+    def _cmd_color(self, command):
+        """COLOR fg,bg — set default paint/text indices 0..15 (JMR)."""
+        rest = command[5:].strip()
+        a, b = self._split_top_level_comma(rest)
+        if b is None:
+            self._error_fc('COLOR needs fg,bg')
+            return
+        fg = int(self.evaluate_expression(a))
+        bg = int(self.evaluate_expression(b))
+        if not (0 <= fg <= 15 and 0 <= bg <= 15):
+            self._error_fc('COLOR indices must be 0..15')
+            return
+        self.color_fg = fg & 0xF
+        self.color_bg = bg & 0xF
+
+    def _cmd_sound(self, command):
+        """SOUND freq[,ms] — enqueue tone; SOUND 0 stops+flushes (JMR)."""
+        rest = command[5:].strip()
+        a, b = self._split_top_level_comma(rest)
+        freq = int(self.evaluate_expression(a))
+        dur = 0 if b is None else int(self.evaluate_expression(b))
+        if freq < 0 or freq > 65535 or dur < 0 or dur > 65535:
+            self._error_fc('SOUND out of range')
+            return
+        self._sound_enqueue(freq, dur)
+
+    def _cmd_beep(self, command):
+        """BEEP — enqueue 880 Hz / 250 ms (JMR Nexys default)."""
+        self._sound_enqueue(_BEEP_FREQ_HZ, _BEEP_DURATION_MS)
+
+    def _cmd_random(self, command):
+        """RANDOM — reseed RNG (Level II)."""
+        random.seed()
+
+    def _cmd_cont(self, command):
+        """CONT as program statement — ?CN unless armed by STOP/BREAK."""
+        if not self._cont_armed:
+            self._error_cn()
+            return
+        # Immediate-mode CONT is handled elsewhere; in-program CONT resumes
+        self.program_paused = False
+        self._cont_armed = False
+
+    def _cmd_run_line(self, command):
+        """RUN [line] from program — clear vars, keep screen, jump (JMR selftest)."""
+        rest = command[3:].strip()
+        start_line = None
+        if rest:
+            start_line = int(float(self.evaluate_expression(rest)))
+        # Preserve VRAM / color / display; reset vars + stacks only
+        self.scalar_variables = {}
+        self.array_variables = {}
+        self.array_dimensions = {}
+        self.user_functions = {}
+        self.for_loops = {}
+        self.gosub_stack = []
+        self.data_pointer = 0
+        self._prescan_data()
+        self.error_goto_line = 0
+        self.err_value = 0
+        self.erl_value = 0
+        self._pending_goto = 0
+        self._cont_armed = False
+        if start_line is not None:
+            return start_line
+        if self._line_numbers:
+            return self._line_numbers[0]
+        return None
 
     def _split_top_level_comma(self, s):
         """Split on first comma not inside parentheses. Returns (left, right) or (s.strip(), None)."""
@@ -3124,6 +3383,8 @@ class TRS80Simulator:
             start = self.evaluate_expression(start_expr)
             end = self.evaluate_expression(end_expr)
             step = self.evaluate_expression(step_expr) if step_expr else 1
+            # NEW: same-var reclaim drops this frame and all inners (JMR/Level II)
+            self._drop_for_frame(var)
             # Optimization 8: Store next_line_number at FOR time
             next_idx = self.current_line_index + 1
             next_ln = self._line_numbers[next_idx] if next_idx < len(self._line_numbers) else None
@@ -3141,36 +3402,47 @@ class TRS80Simulator:
                 self.debug_print(f"FOR {var}={start} TO {end} STEP {step}")
 
     def _cmd_next(self, command):
-        if self.for_loops:
-            # Parse variable name from NEXT command
-            next_var = command[4:].strip() if len(command) > 4 else ''
-            if next_var:
-                # Match specified variable
-                if next_var in self.for_loops:
-                    var = next_var
-                else:
-                    self._error_nf(next_var)
-                    return
-            else:
-                # Use innermost loop (avoid building a full list)
-                var = next(reversed(self.for_loops))
-            loop = self.for_loops[var]
-            # Read from scalar variable so manual changes (e.g., AI=NA to break)
-            # are respected — real TRS-80 BASIC reads the variable, not an internal copy
-            # NEW: _get_scalar/_set_scalar so DEFINT I uses the I% slot
-            loop['current'] = self._get_scalar(var, loop['current']) + loop['step']
-            self._set_scalar(var, loop['current'])
-            if (loop['step'] > 0 and loop['current'] <= loop['end']) or (loop['step'] < 0 and loop['current'] >= loop['end']):
-                if self.debug_mode:
-                    self.debug_print(f"NEXT {var} -> {loop['current']} (repeat)")
-                # Optimization 8: Use cached next_line_number from FOR time
-                return loop['next_line_number']
-            else:
-                if self.debug_mode:
-                    self.debug_print(f"NEXT {var} -> done")
-                self.for_loops.pop(var)
-        else:
+        """NEXT [var[,var…]] — multi-var closes several loops (JMR NEXT J,I)."""
+        if not self.for_loops:
             self._error_nf('')
+            return
+        rest = command[4:].strip() if len(command) > 4 else ''
+        if not rest:
+            return self._next_one_var(next(reversed(self.for_loops)))
+        # Comma-separated: step each named var left-to-right
+        names = [n.strip() for n in rest.split(',') if n.strip()]
+        result = None
+        for name in names:
+            result = self._next_one_var(name)
+            if result is not None:
+                # Looping back — remaining names wait for next NEXT
+                return result
+        return result
+
+    def _next_one_var(self, next_var):
+        if next_var not in self.for_loops:
+            # Named NEXT when not innermost: pop frames above until match (JMR)
+            while self.for_loops:
+                top = next(reversed(self.for_loops))
+                if top == next_var:
+                    break
+                self.for_loops.pop(top)
+            if next_var not in self.for_loops:
+                self._error_nf(next_var)
+                return None
+        var = next_var
+        loop = self.for_loops[var]
+        loop['current'] = self._get_scalar(var, loop['current']) + loop['step']
+        self._set_scalar(var, loop['current'])
+        if (loop['step'] > 0 and loop['current'] <= loop['end']) or (loop['step'] < 0 and loop['current'] >= loop['end']):
+            if self.debug_mode:
+                self.debug_print(f"NEXT {var} -> {loop['current']} (repeat)")
+            return loop['next_line_number']
+        else:
+            if self.debug_mode:
+                self.debug_print(f"NEXT {var} -> done")
+            self.for_loops.pop(var)
+            return None
 
     def _cmd_on(self, command):
         # NEW: ON ERROR GOTO n (n=0 disables)
@@ -3239,8 +3511,13 @@ class TRS80Simulator:
         pass
 
     def _cmd_read(self, command):
-        variables = [v.strip() for v in command[4:].split(',')]
+        # NEW: split on top-level commas only — READ W(C,R) must stay one target
+        # (naive .split(',') broke PAC_CS maze load into "W(C" / "R)").
+        variables = self._split_all_top_level_commas(command[4:].strip())
         for var in variables:
+            var = var.strip()
+            if not var:
+                continue
             if self.data_pointer < len(self.data_values):
                 value = self.data_values[self.data_pointer].strip()
                 array_match = self._regex_cache['array_match'].match(var)
@@ -3455,11 +3732,13 @@ class TRS80Simulator:
         line_number = self._get_current_line_number()
         self.print_to_screen(f"BREAK IN {line_number}")
         self.program_paused = True
+        self._cont_armed = True  # NEW: CONT legal after STOP
         self.stop_button.config(text="CONT", state=tk.NORMAL)
         self.enable_immediate_mode()
 
     def _cmd_end(self, command):
         self.program_running = False
+        self._cont_armed = False  # END disarms CONT (JMR)
         self.stop_button.config(state=tk.DISABLED)
         self._flush_graphics()
     
@@ -3479,7 +3758,8 @@ class TRS80Simulator:
     _PROTECTED_FUNCTIONS = frozenset([
         'SIN', 'COS', 'TAN', 'ATN', 'EXP', 'LOG', 'SQR', 'ABS', 'INT', 'RND',
         'CHR$', 'STR$', 'LEFT$', 'RIGHT$', 'MID$', 'INSTR', 'LEN',
-        'ASC', 'VAL', 'PEEK', 'POINT', 'FIX', 'SGN', 'STRING$'
+        'ASC', 'VAL', 'PEEK', 'POINT', 'COLORAT', 'FIX', 'SGN', 'STRING$',
+        'CINT', 'CSNG', 'CDBL', 'POS', 'MEM', 'FRE'
     ])
 
     def _build_quote_map(self, s):
@@ -4036,7 +4316,8 @@ class TRS80Simulator:
     def _init_builtin_functions(self):
         """Initialize the built-in function dispatch table"""
         self._builtin_functions = {
-            'INT': lambda v, ie: int(float(v)),
+            # Level II INT = floor toward -inf (not Python trunc toward 0)
+            'INT': lambda v, ie: math.floor(float(v)),
             'SIN': lambda v, ie: math.sin(float(v)),
             'COS': lambda v, ie: math.cos(float(v)),
             'TAN': lambda v, ie: math.tan(float(v)),
@@ -4052,6 +4333,12 @@ class TRS80Simulator:
             'ASC': lambda v, ie: ord(str(v).strip("'\"")[0]) if str(v).strip("'\"") else 0,
             'PEEK': lambda v, ie: self.peek(int(v)),
             'POINT': self._func_point,
+            'COLORAT': self._func_colorat,
+            'CINT': lambda v, ie: self._cint(v),
+            'CSNG': lambda v, ie: float(v),
+            'CDBL': lambda v, ie: float(v),  # JMR: # / CDBL accepted as single
+            'POS': lambda v, ie: self.cursor_col,
+            'MEM': lambda v, ie: self._mem_bytes(),
             'LEN': lambda v, ie: len(str(v)),
             'STR$': self._func_str,
             'CHR$': lambda v, ie: "'" + chr(int(float(v))).replace("'", "\\'") + "'",
@@ -4115,10 +4402,28 @@ class TRS80Simulator:
             if len(parts) < 2:
                 return 0
             x, y = map(lambda v: int(self._eval_nested(v.strip())), parts[:2])
-            # Level II BASIC: POINT uses 0..127, 0..47 (same as SET/RESET).
+            # Level II / JMR: OOB → ?FC (no wrap)
+            if not (0 <= x < 128 and 0 <= y < 48):
+                self._error_fc(f'POINT({x},{y}) off screen')
+                return 0
             return self.get_pixel(x, y)
         except ValueError as e:
             self.debug_print(f"Error in POINT function: {str(e)}", 'error')
+            return 0
+
+    def _func_colorat(self, inner_value, inner_expr):
+        """COLORAT(x,y) — color-plane index 0..15 (JMR)."""
+        try:
+            parts = self._split_all_top_level_commas(inner_expr)
+            if len(parts) < 2:
+                return 0
+            x, y = map(lambda v: int(self._eval_nested(v.strip())), parts[:2])
+            if not (0 <= x < 128 and 0 <= y < 48):
+                self._error_fc(f'COLORAT({x},{y}) off screen')
+                return 0
+            return self.color_matrix[y][x] & 0xF
+        except ValueError as e:
+            self.debug_print(f"Error in COLORAT: {str(e)}", 'error')
             return 0
 
     def _func_fre(self, inner_value, inner_expr):
@@ -4210,9 +4515,10 @@ class TRS80Simulator:
     # ============================================================
     def poke(self, address, value):
         """
-        Simulate POKE command for TRS-80 screen memory.
+        Simulate POKE command for TRS-80 screen memory + JMR color/sound MMIO.
         Screen memory starts at 15360 and ends at 16383.
         """
+        value = int(value) & 0xFF
         if 15360 <= address <= 16383:
             screen_pos = address - 15360
             row = screen_pos // 64
@@ -4224,13 +4530,24 @@ class TRS80Simulator:
             # Update the screen display
             x = col * self._char_w
             y = row * self._char_h
-            self.screen.create_text(x, y, text=chr(value), font=self._screen_font, fill="lime", anchor="nw",
+            self.screen.create_text(x, y, text=chr(value), font=self._screen_font, fill=self._fg_hex(), anchor="nw",
                 tags=(f"c{row}_{col}", self.CANVAS_TEXT_LAYER_TAG))
             
             self.debug_print(f"POKE: Address={address}, Value={value}, Row={row}, Col={col}")
+        elif address == _IO_COLOR_FG:
+            self.color_fg = value & 0xF
+        elif address == _IO_COLOR_BG:
+            self.color_bg = value & 0xF
+        elif _IO_PALETTE_BASE <= address < _IO_PALETTE_BASE + 32:
+            # Two bytes per can: lo then hi nibble of RGB444
+            idx = (address - _IO_PALETTE_BASE) // 2
+            if 0 <= idx <= 15:
+                if (address - _IO_PALETTE_BASE) % 2 == 0:
+                    self.palette[idx] = (self.palette[idx] & 0xF00) | value
+                else:
+                    self.palette[idx] = (self.palette[idx] & 0x0FF) | ((value & 0x0F) << 8)
         else:
             self.debug_print(f"POKE: Address={address}, Value={value}")
-            self.debug_print(f"Warning: Address out of range for screen memory")
 
         
     def peek(self, address):
@@ -4253,6 +4570,32 @@ class TRS80Simulator:
             row = screen_pos // 64
             col = screen_pos % 64
             return ord(self.screen_content[row][col])
+        elif address == _IO_COLOR_FG:
+            return self.color_fg & 0xF
+        elif address == _IO_COLOR_BG:
+            return self.color_bg & 0xF
+        elif _IO_PALETTE_BASE <= address < _IO_PALETTE_BASE + 32:
+            idx = (address - _IO_PALETTE_BASE) // 2
+            if 0 <= idx <= 15:
+                rgb = self.palette[idx]
+                if (address - _IO_PALETTE_BASE) % 2 == 0:
+                    return rgb & 0xFF
+                return (rgb >> 8) & 0x0F
+            return 0
+        elif address == _IO_SOUND_FREQ_LO:
+            return self._sound_freq & 0xFF
+        elif address == _IO_SOUND_FREQ_HI:
+            return (self._sound_freq >> 8) & 0xFF
+        elif address == _IO_SOUND_DUR_LO:
+            return self._sound_dur & 0xFF
+        elif address == _IO_SOUND_DUR_HI:
+            return (self._sound_dur >> 8) & 0xFF
+        elif address == _IO_SOUND_CTRL:
+            return self._sound_ctrl_byte()
+        elif address == _IO_SOUND_QCNT_LO:
+            return len(self._sound_queue) & 0xFF
+        elif address == _IO_SOUND_QCNT_HI:
+            return (len(self._sound_queue) >> 8) & 0x03
         else:
             return 0
     
@@ -4420,32 +4763,34 @@ class TRS80Simulator:
         self._set_scalar(var_name, line)
 
     # ============================================================
-    #  SECTION: Graphics (SET/RESET/POINT)
+    #  SECTION: Graphics (SET/RESET/POINT) + JMR color plane
     #  The 128x48 pixel grid is stored in self.pixel_matrix.
-    #  SET/RESET queue operations in _pending_graphics (batched
-    #  every _GRAPHICS_PENDING_BATCH ops or at GUI-update boundaries).  _flush_graphics
-    #  draws/erases pixel rectangles on the Canvas.  self._active_pixels
-    #  tracks which (x,y) are lit for efficient redraw/scroll.
+    #  Parallel color_matrix holds 4-bit indices painted by SET/RESET.
     # ============================================================
-    def set_pixel(self, x, y):
-        if 0 <= x < 128 and 0 <= y < 48:
-            self.pixel_matrix[y][x] = 1
-            self._pending_graphics.append(('set', x, y))
-            self._active_pixels.add((x, y))
-            
-            # Process graphics in batches to improve speed
-            if len(self._pending_graphics) >= _GRAPHICS_PENDING_BATCH:
-                self._flush_graphics()
+    def set_pixel(self, x, y, color=None):
+        # NEW: OOB → ?FC (JMR/Level II — no wrap into VRAM)
+        if not (0 <= x < 128 and 0 <= y < 48):
+            self._error_fc(f'SET({x},{y}) off screen')
+            return
+        c = self.color_fg if color is None else (color & 0xF)
+        self.pixel_matrix[y][x] = 1
+        self.color_matrix[y][x] = c
+        self._pending_graphics.append(('set', x, y, c))
+        self._active_pixels.add((x, y))
+        if len(self._pending_graphics) >= _GRAPHICS_PENDING_BATCH:
+            self._flush_graphics()
 
     def reset_pixel(self, x, y):
-        if 0 <= x < 128 and 0 <= y < 48:
-            self.pixel_matrix[y][x] = 0
-            self._pending_graphics.append(('reset', x, y))
-            self._active_pixels.discard((x, y))
-            
-            # Process graphics in batches to improve speed
-            if len(self._pending_graphics) >= _GRAPHICS_PENDING_BATCH:
-                self._flush_graphics()
+        if not (0 <= x < 128 and 0 <= y < 48):
+            self._error_fc(f'RESET({x},{y}) off screen')
+            return
+        bg = self.color_bg & 0xF
+        self.pixel_matrix[y][x] = 0
+        self.color_matrix[y][x] = bg  # RESET paints BG into color plane (JMR)
+        self._pending_graphics.append(('reset', x, y, bg))
+        self._active_pixels.discard((x, y))
+        if len(self._pending_graphics) >= _GRAPHICS_PENDING_BATCH:
+            self._flush_graphics()
     
     def _flush_graphics(self):
         """Process all pending graphics operations in one batch.
@@ -4455,21 +4800,25 @@ class TRS80Simulator:
 
         ps = self.pixel_size
         cache = self._gfx_pixel_item_ids
-        for operation, x, y in self._pending_graphics:
+        for item in self._pending_graphics:
+            operation, x, y = item[0], item[1], item[2]
+            cidx = item[3] if len(item) > 3 else self.color_fg
             key = (x, y)
             if operation == 'set':
+                fill = self._palette_hex(cidx)
                 if key in cache:
-                    self.screen.itemconfigure(cache[key], fill="lime", outline="lime")
+                    self.screen.itemconfigure(cache[key], fill=fill, outline=fill)
                 else:
                     kid = self.screen.create_rectangle(
                         x * ps, y * ps,
                         (x + 1) * ps, (y + 1) * ps,
-                        fill="lime", outline="lime", tags=f"p{x}_{y}"
+                        fill=fill, outline=fill, tags=f"p{x}_{y}"
                     )
                     cache[key] = kid
-            else:  # reset — recolor to black; skip create if no cached item (canvas bg is black)
+            else:  # reset — recolor to current BG
+                fill = self._bg_hex()
                 if key in cache:
-                    self.screen.itemconfigure(cache[key], fill="black", outline="black")
+                    self.screen.itemconfigure(cache[key], fill=fill, outline=fill)
 
         self._pending_graphics = []
         # Keep text above p{x}_{y} items (RESET recolors gfx on top of glyphs in Tk draw order — mirrors web text layer).
@@ -4485,6 +4834,116 @@ class TRS80Simulator:
     def flush_graphics(self):
         """Public method to force immediate graphics update"""
         self._flush_graphics()
+
+    # ============================================================
+    #  SECTION: Sound (JMR queued SOUND/BEEP)
+    # ============================================================
+    def _sound_ctrl_byte(self):
+        """B4D4: bit0=running bit1=full bit2=busy (FM: busy only for continuous)."""
+        with self._sound_lock:
+            qn = len(self._sound_queue)
+            ctrl = 0
+            if self._sound_running:
+                ctrl |= 0x01
+                ctrl |= 0x04  # continuous tone keeps busy
+            if qn >= _SOUND_QUEUE_DEPTH:
+                ctrl |= 0x02
+            return ctrl
+
+    def _sound_enqueue(self, freq_hz, duration_ms):
+        if freq_hz == 0:
+            self._sound_stop_all()
+            return
+        with self._sound_lock:
+            if len(self._sound_queue) >= _SOUND_QUEUE_DEPTH:
+                return  # drop when full (silicon stalls; host just ignores)
+            self._sound_freq = int(freq_hz)
+            self._sound_dur = int(duration_ms)
+            self._sound_queue.append((self._sound_freq, self._sound_dur))
+            # FM: continuous (ms=0) stays running; timed notes finish for host wait loops
+            self._sound_running = (duration_ms == 0)
+        self._sound_ensure_worker()
+
+    def _sound_stop_all(self):
+        """SOUND 0 — stop current note and flush queue."""
+        self._sound_stop.set()
+        with self._sound_lock:
+            self._sound_queue.clear()
+            self._sound_running = False
+            self._sound_freq = 0
+            self._sound_dur = 0
+        self._sound_stop.clear()
+
+    def _sound_ensure_worker(self):
+        t = self._sound_thread
+        if t is not None and t.is_alive():
+            return
+        self._sound_thread = threading.Thread(target=self._sound_worker, daemon=True)
+        self._sound_thread.start()
+
+    def _sound_worker(self):
+        """Play queued square tones via temp WAV + afplay/aplay (no extra deps)."""
+        while True:
+            with self._sound_lock:
+                if not self._sound_queue:
+                    self._sound_running = False
+                    break
+                freq, dur = self._sound_queue.pop(0)
+                self._sound_freq = freq
+                self._sound_dur = dur
+                self._sound_running = (dur == 0)
+            if self._sound_stop.is_set():
+                continue
+            # Continuous: play until stop or next note — host uses short chunks
+            play_ms = 500 if dur == 0 else max(1, dur)
+            try:
+                self._play_tone_wav(freq, play_ms)
+            except Exception:
+                pass
+            # Continuous: keep re-queuing front until SOUND 0
+            if dur == 0 and not self._sound_stop.is_set():
+                with self._sound_lock:
+                    if self._sound_running:
+                        self._sound_queue.insert(0, (freq, 0))
+
+    def _play_tone_wav(self, freq_hz, duration_ms):
+        """Generate a short square-wave WAV and play with the OS player."""
+        if freq_hz < 1:
+            time.sleep(duration_ms / 1000.0)
+            return
+        rate = 22050
+        n = max(1, int(rate * duration_ms / 1000.0))
+        amp = 8000
+        path = None
+        try:
+            fd, path = tempfile.mkstemp(suffix='.wav')
+            os.close(fd)
+            with wave.open(path, 'w') as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(rate)
+                frames = bytearray()
+                period = max(1, int(rate / freq_hz))
+                for i in range(n):
+                    sample = amp if (i % period) < (period // 2) else -amp
+                    frames += struct.pack('<h', sample)
+                w.writeframes(frames)
+            if self._sound_stop.is_set():
+                return
+            if platform.system() == 'Darwin' and shutil.which('afplay'):
+                subprocess.run(['afplay', path], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            elif shutil.which('aplay'):
+                subprocess.run(['aplay', '-q', path], check=False,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            else:
+                time.sleep(duration_ms / 1000.0)
+        finally:
+            if path and os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError:
+                    pass
 
     # ============================================================
     #  SECTION: File I/O (Tape/Save/Load)
@@ -4705,6 +5164,10 @@ class TRS80Simulator:
     def _ensure_immediate_prompt(self, show_ready_if_empty=False):
         """Keep exactly one immediate-mode prompt visible on the current line."""
         if show_ready_if_empty and self.cursor_row == 0 and self.cursor_col == 0:
+            # Boot: banner then READY (FPGA paints BANNER; VERSION reprints it)
+            if not self._banner_shown:
+                self.print_to_screen(BANNER, end='\n')
+                self._banner_shown = True
             self.print_to_screen("READY", end='\n')
 
         line_str = ''.join(self.screen_content[self.cursor_row]).rstrip()
@@ -4767,7 +5230,7 @@ class TRS80Simulator:
             # Display character on screen
             x = self.cursor_col * self._char_w
             y = self.cursor_row * self._char_h
-            self.screen.create_text(x, y, text=char, font=self._screen_font, fill="lime", anchor="nw",
+            self.screen.create_text(x, y, text=char, font=self._screen_font, fill=self._fg_hex(), anchor="nw",
                 tags=(f"c{self.cursor_row}_{self.cursor_col}", self.CANVAS_TEXT_LAYER_TAG))
             self.screen_content[self.cursor_row][self.cursor_col] = char
             self.cursor_col += 1
@@ -4848,7 +5311,7 @@ class TRS80Simulator:
         elif cmd == "NEW":
             response = self.print_to_screen("NEW PROGRAM - ARE YOU SURE? (Y/N)")
             # For simplicity, we'll just clear immediately
-            self.new_program()
+            self.new_program(reset_colors=True)
             self.stored_program = []
             self.input_area.delete(1.0, tk.END)
             self.enable_immediate_mode()
@@ -4863,12 +5326,19 @@ class TRS80Simulator:
             self.gosub_stack = []
             self.data_pointer = 0
             self._last_var_count = -1
+            self._cont_armed = False
             self.print_to_screen("VARIABLES CLEARED")
         
         elif cmd == "CONT":
-            if self.program_paused:
+            if self._cont_armed and self.program_paused:
                 self.disable_immediate_mode()
+                self._cont_armed = False
                 self.stop_program()  # This toggles the pause state
+            elif not self._cont_armed:
+                self._error_cn()
+            elif self.program_paused:
+                self.disable_immediate_mode()
+                self.stop_program()
         
         elif cmd in ("LOAD", "CLOAD"):
             # NEW: CLOAD = LOAD alias (computer file dialog — not µSD/disk)
@@ -4888,6 +5358,23 @@ class TRS80Simulator:
         elif cmd == "CLS":
             self.clear_screen()
             self.print_to_screen("READY", end='\n')
+
+        elif cmd == "VERSION":
+            # NEW V2.0: matches JMR FPGA VERSION (banner + feature line)
+            self.print_to_screen(BANNER, end='\n')
+            self.print_to_screen(VERSION_FEATURES, end='\n')
+
+        elif cmd == "HELP":
+            # NEW V2.0: cleaned FPGA console HELP / HELP BASIC
+            rest = command[4:].strip().upper()
+            if rest == "":
+                for line in CONSOLE_HELP_LINES:
+                    self.print_to_screen(line, end='\n')
+            elif rest == "BASIC":
+                for line in CONSOLE_HELP_BASIC_LINES:
+                    self.print_to_screen(line, end='\n')
+            else:
+                self._error_sn("HELP / HELP BASIC only")
         
         elif cmd == "DELETE":
             if len(cmd_parts) > 1:
@@ -4961,9 +5448,11 @@ class TRS80Simulator:
             self.print_to_screen("?SYNTAX ERROR")
 
 help_text1 = """
-TRS-80 BASIC Simulator Help
+TRS-80 BASIC Simulator V2.0 Help
 
 Immediate Mode Commands (type directly on green screen):
+- VERSION - Banner + W/ COLOR & SOUND
+- HELP / HELP BASIC - Console keyword sheets (JMR-style)
 - RUN - Run the program
 - LIST [line#] or [line#-line#] - List program (also LIST n- / LIST -m)
 - LLIST - Same as LIST (printer alias → screen here)
@@ -5000,6 +5489,8 @@ Program Commands:
 - READ variable1, variable2, ...
 - RESTORE
 - STOP (Pause program - can continue)
+- COLOR fg,bg / COLORAT(x,y) / SOUND freq,ms / BEEP
+- SET(x,y) / SET(x,y,c) / RESET / POINT
 - END (Stop program)
 - PRINT#-1,expression (write to tape)
 - INPUT#-1,variable (read from tape)"""
@@ -5030,6 +5521,7 @@ String Functions:
 - STRING$(count, char): Repeat character
 - INSTR([start,] string$, find$): Find substring (1-based)
 - INKEY$: Get key press (non-blocking)
+- Arrow keys (JMR FPGA): Left=17 Right=18 Up=19 Down=20 via INKEY$/PEEK(14400)
 
 Operators:
 - Arithmetic: +, -, *, /, ^ (power), MOD

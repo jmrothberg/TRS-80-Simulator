@@ -78,7 +78,7 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 </head>
 <body>
 <div id="container">
-<h1>JMR's TRS-80 Simulator v1.7</h1>
+<h1>JMR's TRS-80 Simulator V2.0</h1>
 <div id="screenFrame">
 <div id="screenStack">
 <canvas id="screenGfx" width="768" height="288" tabindex="0"></canvas>
@@ -137,8 +137,76 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 <script>
 // ===================================================================
 //  TRS-80 Model I Level II BASIC Simulator — Web Edition
-//  Ported from TRS80_March_22_26.py by Jonathan Rothberg (JMR)
+//  Ported from TRS80_Aug_10_26.py by Jonathan Rothberg (JMR)
+//  V2.0 — JMR FPGA parity: COLOR / SOUND / arrows / HELP / VERSION
 // ===================================================================
+
+// Boot banner + VERSION (mirrors JMR FPGA machine.BANNER; host V2.0)
+const BANNER = 'JMR LEVEL II BASIC SIMULATOR V2.0';
+const VERSION_FEATURES = 'W/ COLOR & SOUND';
+// Cleaned console HELP from JMR FPGA (no µSD DIR/REMOVE/EDIT — host file dialog)
+const CONSOLE_HELP_LINES = [
+    'RUN NEW LIST CLS VERSION',
+    'LIST n / n-m / LIST -',
+    'LOAD SAVE  (file dialog)',
+    'HELP / HELP BASIC',
+    'ESC or Ctrl+C = BREAK',
+    'Arrows: L=17 R=18 U=19 D=20',
+    '=== COLOR + SOUND ===',
+    'COLOR fg,bg',
+    '  text ink + paper + SET default',
+    '  0..15  1=green 8=white 0=black',
+    'SET(x,y)     paint with fg',
+    'SET(x,y,c)   paint color c',
+    'RESET(x,y)   clear pixel to bg',
+    'POINT(x,y)   -1 lit / 0 clear',
+    'COLORAT(x,y) color index 0..15',
+    'SOUND hz,ms  tone; SOUND 0=stop',
+    'BEEP         short 880 Hz beep',
+    'NEW restores green on black',
+    'try: Color_T / Sound_T / PAC_CS',
+];
+// Cleaned HELP BASIC — Level II + JMR surface (from FPGA CONSOLE_HELP_BASIC_LINES)
+const CONSOLE_HELP_BASIC_LINES = [
+    'RUN / RUN line',
+    'NEW / LIST / CLS / REM',
+    'LOAD/SAVE (file dialog)',
+    'CLOAD/CSAVE = LOAD/SAVE',
+    'PRINT or ? / INPUT',
+    'PRINT@ / TAB / USING',
+    'IF c THEN / ELSE',
+    'FOR i=a TO b STEP s / NEXT',
+    'GOTO / GOSUB / RETURN',
+    'ON x GOTO/GOSUB',
+    'ON ERROR GOTO n',
+    'RESUME / RESUME NEXT / line',
+    'ERROR n',
+    'LET / END / STOP / CONT',
+    'READ / DATA / RESTORE',
+    'DIM a(n) / CLEAR / RANDOM',
+    'Names keep 2 chars: A, A1, AB',
+    'Type marks: % int  ! sng  $ str',
+    '# same as ! (no double)',
+    'No mark -> DEFINT/DEFSNG/DEFSTR',
+    'DEFINT/DEFSNG/DEFSTR A-Z',
+    'DEFDBL: same as DEFSNG',
+    'DEF FNname(x)=expr',
+    'SET / RESET / POKE / PEEK',
+    'POINT / COLORAT / COLOR',
+    'SOUND freq,ms / BEEP',
+    'OPEN "I/O",1,"f" / CLOSE',
+    'INPUT#1 / PRINT#1 / LINE INPUT#1',
+    'File#: channel 1 only',
+    'LEFT$ RIGHT$ MID$',
+    'CHR$ ASC STR$ VAL LEN',
+    'STRING$ INSTR INKEY$',
+    'ABS INT SGN FIX RND',
+    'SQR SIN COS TAN ATN',
+    'LOG EXP CINT CSNG CDBL',
+    'MEM FRE ERL ERR',
+    'AND OR NOT MOD',
+    'No AUTO USR LPRINT SYSTEM',
+];
 
 // -- Comparison wrappers for TRS-80 semantics (TRUE = -1, FALSE = 0) --
 function _gt(a, b) { return a > b ? -1 : 0; }
@@ -160,6 +228,26 @@ const INKEY_YIELD_MS_BUDGET   = 16;
 const NO_INKEY_YIELD_MS_BUDGET = 50;
 // SET/RESET batch before gfx blit — one scaled drawImage per batch (games)
 const GRAPHICS_PENDING_BATCH = 256;
+
+// NEW Sep 2026: JMR default palette RGB444 (index 1 = phosphor green 0x3F3)
+const DEFAULT_PALETTE_RGB444 = [
+    0x000, 0x3F3, 0xF00, 0x0F0, 0x00F, 0xFF0, 0xF0F, 0x0FF,
+    0xFFF, 0xF80, 0x8F0, 0x08F, 0xF08, 0x888, 0xC00, 0x0C0,
+];
+// Color / sound MMIO (decimal) — same as JMR MEMORY_MAP B4A0/B4B0/B4D0
+const IO_COLOR_FG = 46240;
+const IO_COLOR_BG = 46241;
+const IO_PALETTE_BASE = 46256;
+const IO_SOUND_FREQ_LO = 46288;
+const IO_SOUND_FREQ_HI = 46289;
+const IO_SOUND_DUR_LO = 46290;
+const IO_SOUND_DUR_HI = 46291;
+const IO_SOUND_CTRL = 46292;
+const IO_SOUND_QCNT_LO = 46293;
+const IO_SOUND_QCNT_HI = 46294;
+const BEEP_FREQ_HZ = 880;
+const BEEP_DURATION_MS = 250;
+const SOUND_QUEUE_DEPTH = 512;
 
 const KEYWORD_REPLACEMENTS = {
     'MOD': ' % ',
@@ -207,6 +295,22 @@ constructor() {
     this.cursorVisible = true;
     this._lastCursorRow = undefined;
     this._lastCursorCol = undefined;
+    // NEW Sep 2026: JMR color plane + palette (FG=1 phosphor, BG=0)
+    this.colorFg = 1;
+    this.colorBg = 0;
+    this.palette = DEFAULT_PALETTE_RGB444.slice();
+    this.colorMatrix = [];
+    // NEW Sep 2026: queued SOUND/BEEP (JMR sound_engine parity — Web Audio)
+    this._soundQueue = [];
+    this._soundRunning = false;
+    this._soundFreq = 0;
+    this._soundDur = 0;
+    this._soundPlaying = false; // async player active
+    this._soundStopFlag = false;
+    this._audioCtx = null;
+    this._soundOsc = null;
+    this._soundGain = null;
+    this._contArmed = false; // CONT legal only after STOP/BREAK
 
     // Interpreter state
     this.scalarVariables = {};
@@ -268,7 +372,7 @@ constructor() {
     this._gfxOffscreen.height = 48;
     this._gfxCtx = this._gfxOffscreen.getContext('2d');
     this._gfxImageData = this._gfxCtx.createImageData(128, 48);
-    // Single 32-bit writes per pixel (RGBA little-endian: green 0xFF33FF33, black 0xFF000000)
+    // Single 32-bit writes per pixel (RGBA little-endian; colors from palette)
     this._gfxPixelsU32 = new Uint32Array(this._gfxImageData.data.buffer);
     this.ctxGfx.imageSmoothingEnabled = false;
     this.ctxText.imageSmoothingEnabled = false;
@@ -286,6 +390,7 @@ constructor() {
     this.inputStartCol = 0;
 
     this.replaced = false;
+    this._bannerShown = false; // boot paints BANNER once before READY
 
     // Compile regex patterns
     this._compileRegexPatterns();
@@ -361,7 +466,8 @@ _compileRegexPatterns() {
     this._re.tab          = /TAB\((\d+)\)/;
     // ATN must be listed: otherwise ATN(x) is not reduced in _evalNested and can fall through as a string (mirrors TRS80_March_30_26.py func_match).
     // NEW: FRE — Level II string-space free (MEM/ERR/ERL are bare keywords below)
-    this._re.funcMatch    = /(INT|SIN|COS|TAN|ATN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR|FRE)\(/;
+    // NEW Sep 2026: COLORAT / CINT / CSNG / CDBL / POS (JMR FPGA parity)
+    this._re.funcMatch    = /(INT|SIN|COS|TAN|ATN|SQR|LOG|EXP|SGN|FIX|CHR\$|STRING\$|VAL|RND|ASC|PEEK|POINT|COLORAT|STR\$|LEN|LEFT\$|RIGHT\$|MID\$|ABS|INSTR|FRE|CINT|CSNG|CDBL|POS|MEM)\(/;
     this._re.onErrorGoto  = /^ON\s+ERROR\s+GOTO\s+(.*)$/i;
     this._re.memBare      = /\bMEM\b/g;
     this._re.errBare      = /\bERR\b/g;
@@ -374,6 +480,9 @@ _compileRegexPatterns() {
 _resetScreenArrays() {
     this.screenContent = Array.from({length: ROWS}, () => Array(COLS).fill(' '));
     this.pixelMatrix   = Array.from({length: 48}, () => Array(128).fill(0));
+    // NEW Sep 2026: parallel color plane (filled to BG on CLS)
+    const bg = this.colorBg & 0xF;
+    this.colorMatrix   = Array.from({length: 48}, () => Array(128).fill(bg));
     this.activePixels  = new Set();
 }
 
@@ -443,13 +552,22 @@ get _helpTexts() { return [
    or paste a program into the text area below it.
 
 2. Click RUN (or type RUN on the green screen).
+   Type HELP or HELP BASIC for the keyword sheets.
+   Type VERSION for the V2.0 banner + COLOR/SOUND tag.
 
 3. Press Ctrl+C or click STOP to halt a running program (works during INPUT).
    During INPUT, ESC re-prompts (?REDO).
 
 LOADING PROGRAMS
   Click LOAD and select a .bas file to load a program.
+  Or use the Examples dropdown (loads from Basic_Code_Examples/).
   The program appears in the text area — click RUN.
+  Use Debug (button) to watch lines/errors while developing.
+
+  NOTE FOR AUTHORS / AGENTS: .bas files live in ../Basic_Code_Examples/
+  (and Scott_Adams_Basic_version/). When you write or change them, open
+  THIS interpreter (web_TRS_80/index.html), LOAD or pick Examples, RUN,
+  and fix failures here — do not assume a program works unread.
 
 LOADING TAPE DATA (for adventure games, etc.)
   Some BASIC programs read data from "tape" (INPUT#-1).
@@ -486,6 +604,8 @@ Immediate Mode (type on green screen):
   NEW ............. Clear program memory
   CLEAR ........... Clear variables
   CONT ............ Continue after STOP
+  VERSION ......... Banner + W/ COLOR & SOUND
+  HELP / HELP BASIC Console help (JMR-style sheets)
   LOAD / CLOAD .... Load .bas via computer file picker
   SAVE / CSAVE .... Save program via computer download/picker
   CLS ............. Clear screen
@@ -577,6 +697,8 @@ Screen Memory:
   POKE addr,val .. Write memory byte
   Screen: 15360–16383 (64x16 chars)
   Keyboard: PEEK(14400) for polling
+  Arrows (JMR): Left=17 Right=18 Up=19 Down=20
+  (same codes via INKEY$ = CHR$(n); WASD also work in games)
 
 Text Screen:
   64 columns x 16 rows
@@ -651,9 +773,16 @@ clearScreen() {
     this._gfxBatchCount = 0;
     this.screenContent = Array.from({length: ROWS}, () => Array(COLS).fill(' '));
     this.pixelMatrix   = Array.from({length: 48}, () => Array(128).fill(0));
+    // NEW Sep 2026: CLS clears color plane to current BG; FG/BG sticky (JMR)
+    const bg = this.colorBg & 0xF;
+    this.colorMatrix   = Array.from({length: 48}, () => Array(128).fill(bg));
     this.activePixels  = new Set();
     this.cursorRow = 0;
     this.cursorCol = 0;
+    // Update canvas CSS bg from palette
+    const bgHex = this._bgHex();
+    this.canvasGfx.style.background = bgHex;
+    this.canvasText.style.background = 'transparent';
     this._syncGfxBufferFromPixelMatrixFull();
     this._blitGraphicsBitmapToMain();
     this.ctxText.clearRect(0, 0, SCREEN_W, SCREEN_H);
@@ -665,21 +794,62 @@ _yieldToBrowser() {
     return new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-// Update one logical pixel in the 128×48 buffer (Uint32 RGBA — Mar 2026 perf plan).
-_writeGfxPixelInBuffer(x, y, on) {
+// NEW Sep 2026: JMR color helpers (palette RGB444 → CSS / Uint32 RGBA)
+_resetColorDefaults() {
+    // NEW/cold: phosphor FG=1, BG=0, default 16-can palette.
+    this.colorFg = 1;
+    this.colorBg = 0;
+    this.palette = DEFAULT_PALETTE_RGB444.slice();
+}
+
+_paletteRgb888(index) {
+    const rgb = this.palette[index & 0xF];
+    const r4 = (rgb >> 8) & 0xF;
+    const g4 = (rgb >> 4) & 0xF;
+    const b4 = rgb & 0xF;
+    return [r4 * 17, g4 * 17, b4 * 17];
+}
+
+_paletteHex(index) {
+    const [r, g, b] = this._paletteRgb888(index);
+    return `#${r.toString(16).padStart(2, '0')}${g.toString(16).padStart(2, '0')}${b.toString(16).padStart(2, '0')}`;
+}
+
+_fgHex() { return this._paletteHex(this.colorFg); }
+_bgHex() { return this._paletteHex(this.colorBg); }
+
+// Uint32 little-endian RGBA for ImageData
+_paletteRgbaU32(index) {
+    const [r, g, b] = this._paletteRgb888(index);
+    return (0xFF000000 | (b << 16) | (g << 8) | r) >>> 0;
+}
+
+_dropForFrame(varName) {
+    // JMR/Level II: re-FOR same var truncates stack at that frame (drops inners).
+    if (!Object.prototype.hasOwnProperty.call(this.forLoops, varName)) return;
+    const keys = Object.keys(this.forLoops);
+    const idx = keys.indexOf(varName);
+    for (let i = idx; i < keys.length; i++) delete this.forLoops[keys[i]];
+}
+
+// Update one logical pixel in the 128×48 buffer (Uint32 RGBA — palette color).
+_writeGfxPixelInBuffer(x, y, colorIdx) {
     const idx = y * 128 + x;
-    this._gfxPixelsU32[idx] = on ? 0xFF33FF33 : 0xFF000000;
+    this._gfxPixelsU32[idx] = this._paletteRgbaU32(colorIdx);
 }
 
 // Full rebuild from pixelMatrix — after CLS, scroll/redraw, or any path that mutates matrix without setPixel/resetPixel.
 _syncGfxBufferFromPixelMatrixFull() {
     const u32 = this._gfxPixelsU32;
     const mtx = this.pixelMatrix;
+    const cm = this.colorMatrix;
+    const bgU32 = this._paletteRgbaU32(this.colorBg);
     for (let y = 0; y < 48; y++) {
         const row = mtx[y];
+        const crow = cm[y];
         const base = y * 128;
         for (let x = 0; x < 128; x++) {
-            u32[base + x] = row[x] ? 0xFF33FF33 : 0xFF000000;
+            u32[base + x] = row[x] ? this._paletteRgbaU32(crow[x]) : bgU32;
         }
     }
 }
@@ -696,11 +866,12 @@ _drawTextLayerFromScreenContent() {
     ctx.clearRect(0, 0, SCREEN_W, SCREEN_H);
     ctx.font = this.screenFont;
     ctx.textBaseline = 'top';
+    const fg = this._fgHex();
     for (let r = 0; r < ROWS; r++) {
         for (let c = 0; c < COLS; c++) {
             const ch = this.screenContent[r][c];
             if (ch !== ' ') {
-                ctx.fillStyle = '#33ff33';
+                ctx.fillStyle = fg;
                 ctx.fillText(ch, c * this.charW + 1, r * this.charH + 1);
             }
         }
@@ -711,10 +882,11 @@ drawChar(row, col, char) {
     const x = col * this.charW;
     const y = row * this.charH;
     const ctx = this.ctxText;
-    ctx.fillStyle = 'black';
+    // Paper uses BG; ink uses FG (JMR color)
+    ctx.fillStyle = this._bgHex();
     ctx.fillRect(x, y, this.charW, this.charH);
     if (char && char !== ' ') {
-        ctx.fillStyle = '#33ff33';
+        ctx.fillStyle = this._fgHex();
         ctx.font = this.screenFont;
         ctx.textBaseline = 'top';
         ctx.fillText(char, x + 1, y + 1);
@@ -724,6 +896,8 @@ drawChar(row, col, char) {
 printToScreen(text, end = '\n') {
     const output = String(text) + end;
     const ctx = this.ctxText;
+    const fg = this._fgHex();
+    const bg = this._bgHex();
 
     for (const char of output) {
         if (char === '\n' || this.cursorCol >= COLS) {
@@ -737,10 +911,10 @@ printToScreen(text, end = '\n') {
         this.screenContent[this.cursorRow][this.cursorCol] = char;
         const x = this.cursorCol * this.charW;
         const y = this.cursorRow * this.charH;
-        ctx.fillStyle = 'black';
+        ctx.fillStyle = bg;
         ctx.fillRect(x, y, this.charW, this.charH);
         if (char !== ' ') {
-            ctx.fillStyle = '#33ff33';
+            ctx.fillStyle = fg;
             ctx.font = this.screenFont;
             ctx.textBaseline = 'top';
             ctx.fillText(char, x + 1, y + 1);
@@ -762,6 +936,11 @@ _scrollScreenUp() {
     this.cursorRow = ROWS - 1;
     this.pixelMatrix = this.pixelMatrix.slice(3).concat(
         Array.from({length: 3}, () => Array(128).fill(0))
+    );
+    // NEW Sep 2026: scroll color plane with graphics (JMR video_engine scroll)
+    const bg = this.colorBg & 0xF;
+    this.colorMatrix = this.colorMatrix.slice(3).concat(
+        Array.from({length: 3}, () => Array(128).fill(bg))
     );
     const newActive = new Set();
     for (const id of this.activePixels) {
@@ -803,7 +982,7 @@ updateCursorDisplay() {
     if (this.cursorVisible || this.waitingForInput) {
         const x = this.cursorCol * this.charW;
         const y = this.cursorRow * this.charH;
-        this.ctxText.fillStyle = '#33ff33';
+        this.ctxText.fillStyle = this._fgHex();
         this.ctxText.fillRect(x, y, this.charW, this.charH);
     }
     this._lastCursorRow = this.cursorRow;
@@ -862,8 +1041,17 @@ _handleKeyDown(event) {
 
     // During program execution (not INPUT): update keyboard buffer
     if (this.programRunning && !this.waitingForInput) {
-        if (!ctrl && !this.lastKeyPressed && key.length === 1) {
-            this.lastKeyPressed = key.toUpperCase();
+        if (!ctrl && !this.lastKeyPressed) {
+            // NEW: JMR FPGA arrows → 17/18/19/20 for INKEY$/PEEK(14400)
+            // (ArrowLeft/Right/Up/Down). Same as PAC_CS / Invaders WASD|arrows.
+            const arrows = {
+                ArrowLeft:  String.fromCharCode(17),
+                ArrowRight: String.fromCharCode(18),
+                ArrowUp:    String.fromCharCode(19),
+                ArrowDown:  String.fromCharCode(20),
+            };
+            if (arrows[key]) this.lastKeyPressed = arrows[key];
+            else if (key.length === 1) this.lastKeyPressed = key.toUpperCase();
         }
         event.preventDefault();
         return;
@@ -1075,6 +1263,11 @@ disableImmediateMode() {
 
 _ensureImmediatePrompt(showReady = false) {
     if (showReady && this.cursorRow === 0 && this.cursorCol === 0) {
+        // Boot: banner then READY (FPGA paints BANNER; VERSION reprints it)
+        if (!this._bannerShown) {
+            this.printToScreen(BANNER);
+            this._bannerShown = true;
+        }
         this.printToScreen('READY');
     }
     const lineStr = this.screenContent[this.cursorRow].join('').trimEnd();
@@ -1149,7 +1342,7 @@ processImmediateCommand(command) {
         if (rangeSpec) this.listProgramRange(rangeSpec);
         else this.listProgram();
     } else if (cmd === 'NEW') {
-        this.newProgram();
+        this.newProgram(true); // NEW restores FG=1 BG=0 + default palette (JMR)
         this.storedProgram = [];
         this.inputArea.value = '';
         this.enableImmediateMode();
@@ -1162,9 +1355,17 @@ processImmediateCommand(command) {
         this.forLoops = {};
         this.gosubStack = [];
         this.dataPointer = 0;
+        this._contArmed = false;
         this.printToScreen('VARIABLES CLEARED');
     } else if (cmd === 'CONT') {
-        if (this.programPaused) {
+        // NEW Sep 2026: immediate CONT requires armed by STOP (JMR ?CN)
+        if (this._contArmed && this.programPaused) {
+            this.disableImmediateMode();
+            this._contArmed = false;
+            this.stopProgram();
+        } else if (!this._contArmed) {
+            this._errorCn();
+        } else if (this.programPaused) {
             this.disableImmediateMode();
             this.stopProgram();
         }
@@ -1177,6 +1378,20 @@ processImmediateCommand(command) {
     } else if (cmd === 'CLS') {
         this.clearScreen();
         this.printToScreen('READY');
+    } else if (cmd === 'VERSION') {
+        // NEW V2.0: matches JMR FPGA VERSION (banner + feature line)
+        this.printToScreen(BANNER);
+        this.printToScreen(VERSION_FEATURES);
+    } else if (cmd === 'HELP') {
+        // NEW V2.0: cleaned FPGA console HELP / HELP BASIC
+        const rest = command.replace(/^\s*HELP\s*/i, '').trim().toUpperCase();
+        if (rest === '') {
+            for (const line of CONSOLE_HELP_LINES) this.printToScreen(line);
+        } else if (rest === 'BASIC') {
+            for (const line of CONSOLE_HELP_BASIC_LINES) this.printToScreen(line);
+        } else {
+            this._errorSn('HELP / HELP BASIC only');
+        }
     } else if (cmd === 'DELETE') {
         if (cmdParts.length > 1) this._deleteLines(cmdParts[1]);
     } else {
@@ -1408,7 +1623,7 @@ async executeNextLine() {
     if (this.variablesWindowOpen) this._updateVariablesContent();
 }
 
-newProgram() {
+newProgram(resetColors = false) {
     this.scalarVariables = {};
     this.arrayVariables  = {};
     this.arrayDimensions = {};
@@ -1431,6 +1646,7 @@ newProgram() {
     this._errorLineIndex = 0;
     this._pendingGoto    = 0;
     this._seqChan        = null;
+    this._contArmed      = false;
     this._lineNumbers    = [];
     this._lineCommands   = [];
     this._lineCmdWords   = [];
@@ -1438,6 +1654,8 @@ newProgram() {
     this._lastVarCount    = 0;
     this._arrayPatterns   = {};
     this._varRegexCache   = {};
+    // NEW Sep 2026: only NEW/cold reset restores phosphor FG/BG (JMR)
+    if (resetColors) this._resetColorDefaults();
     this._resetScreenArrays();
     this.clearScreen();
     this._gfxDirty = false;
@@ -1497,6 +1715,13 @@ _initCommandHandlers() {
         'RESUME':  (c) => this._cmdResume(c),
         'OPEN':    (c) => this._cmdOpen(c),
         'CLOSE':   (c) => this._cmdClose(c),
+        // NEW Sep 2026: JMR COLOR / SOUND / RANDOM / CONT / RUN line
+        'COLOR':   (c) => this._cmdColor(c),
+        'SOUND':   (c) => this._cmdSound(c),
+        'BEEP':    (c) => this._cmdBeep(c),
+        'RANDOM':  (c) => this._cmdRandom(c),
+        'CONT':    (c) => this._cmdCont(c),
+        'RUN':     (c) => this._cmdRunLine(c),
     };
 }
 
@@ -1819,16 +2044,96 @@ _cmdSetReset(command) {
         const parenEnd   = command.lastIndexOf(')');
         if (parenStart === -1 || parenEnd === -1) return;
         const coords = command.substring(parenStart + 1, parenEnd);
-        const commaPos = this._findUnquotedComma(coords);
-        if (commaPos === -1) return;
-        // Level II BASIC: SET/RESET use 0..127, 0..47 (manual: upper-left=(0,0)).
-        const x = Math.trunc(this.evaluateExpression(coords.substring(0, commaPos).trim()));
-        const y = Math.trunc(this.evaluateExpression(coords.substring(commaPos + 1).trim()));
-        if (cmdType === 'SET') this.setPixel(x, y);
-        else this.resetPixel(x, y);
+        // NEW Sep 2026: SET(x,y) or SET(x,y,c) — optional color (JMR)
+        const parts = this._splitAllTopLevelCommas(coords);
+        if (parts.length < 2) return;
+        const x = Math.trunc(this.evaluateExpression(parts[0].trim()));
+        const y = Math.trunc(this.evaluateExpression(parts[1].trim()));
+        if (cmdType === 'SET') {
+            let color = null;
+            if (parts.length >= 3)
+                color = Math.trunc(this.evaluateExpression(parts[2].trim())) & 0xF;
+            this.setPixel(x, y, color);
+        } else {
+            this.resetPixel(x, y);
+        }
     } catch (e) {
         this.debugPrint(`Invalid ${command.split(/\s/)[0]} command: ${command}`, 'error');
     }
+}
+
+// NEW Sep 2026: COLOR fg,bg — set default paint/text indices 0..15 (JMR)
+_cmdColor(command) {
+    const rest = command.substring(5).trim();
+    const [a, b] = this._splitTopLevelComma(rest);
+    if (b === null) { this._errorFc('COLOR needs fg,bg'); return; }
+    const fg = Math.trunc(this.evaluateExpression(a));
+    const bg = Math.trunc(this.evaluateExpression(b));
+    if (!(fg >= 0 && fg <= 15 && bg >= 0 && bg <= 15)) {
+        this._errorFc('COLOR indices must be 0..15');
+        return;
+    }
+    this.colorFg = fg & 0xF;
+    this.colorBg = bg & 0xF;
+}
+
+// NEW Sep 2026: SOUND freq[,ms] — enqueue tone; SOUND 0 stops+flushes (JMR)
+_cmdSound(command) {
+    const rest = command.substring(5).trim();
+    const [a, b] = this._splitTopLevelComma(rest);
+    const freq = Math.trunc(this.evaluateExpression(a));
+    const dur = b === null ? 0 : Math.trunc(this.evaluateExpression(b));
+    if (freq < 0 || freq > 65535 || dur < 0 || dur > 65535) {
+        this._errorFc('SOUND out of range');
+        return;
+    }
+    this._soundEnqueue(freq, dur);
+}
+
+// NEW Sep 2026: BEEP — enqueue 880 Hz / 250 ms (JMR Nexys default)
+_cmdBeep(_command) {
+    this._soundEnqueue(BEEP_FREQ_HZ, BEEP_DURATION_MS);
+}
+
+// NEW Sep 2026: RANDOM — reseed RNG (Level II). Math.random isn't seedable; stir state.
+_cmdRandom(_command) {
+    this._rndSeed = (Date.now() ^ ((Math.random() * 0x100000000) >>> 0)) >>> 0;
+    // Stir Math.random a few times so subsequent RND(0) differs after RANDOM
+    for (let i = 0; i < ((this._rndSeed & 7) + 1); i++) Math.random();
+}
+
+// NEW Sep 2026: CONT as program statement — ?CN unless armed by STOP/BREAK
+_cmdCont(_command) {
+    if (!this._contArmed) {
+        this._errorCn();
+        return;
+    }
+    this.programPaused = false;
+    this._contArmed = false;
+}
+
+// NEW Sep 2026: RUN [line] from program — clear vars, keep screen, jump (JMR selftest)
+_cmdRunLine(command) {
+    const rest = command.substring(3).trim();
+    let startLine = null;
+    if (rest) startLine = Math.trunc(Number(this.evaluateExpression(rest)));
+    // Preserve VRAM / color / display; reset vars + stacks only
+    this.scalarVariables = {};
+    this.arrayVariables = {};
+    this.arrayDimensions = {};
+    this.userFunctions = {};
+    this.forLoops = {};
+    this.gosubStack = [];
+    this.dataPointer = 0;
+    this._prescanData();
+    this.errorGotoLine = 0;
+    this.errValue = 0;
+    this.erlValue = 0;
+    this._pendingGoto = 0;
+    this._contArmed = false;
+    if (startLine !== null) return startLine;
+    if (this._lineNumbers.length) return this._lineNumbers[0];
+    return undefined;
 }
 
 _findUnquotedComma(s) {
@@ -2215,6 +2520,8 @@ _cmdFor(command) {
         const start = this.evaluateExpression(m[2]);
         const end   = this.evaluateExpression(m[3]);
         const step  = m[5] ? this.evaluateExpression(m[5]) : 1;
+        // NEW Sep 2026: same-var reclaim drops this frame and all inners (JMR/Level II)
+        this._dropForFrame(varName);
         const nextIdx = this.currentLineIndex + 1;
         const nextLn  = nextIdx < this._lineNumbers.length ? this._lineNumbers[nextIdx] : null;
         this.forLoops[varName] = { start, end, step, current: start, lineIndex: this.currentLineIndex, nextLineNumber: nextLn };
@@ -2224,17 +2531,41 @@ _cmdFor(command) {
     }
 }
 
+// NEW Sep 2026: NEXT [var[,var…]] — multi-var closes several loops (JMR NEXT J,I)
 _cmdNext(command) {
     const keys = Object.keys(this.forLoops);
     if (keys.length === 0) { this._errorNf(''); return; }
-    let nextVar = command.substring(4).trim();
-    let varName;
-    if (nextVar) {
-        if (this.forLoops[nextVar]) varName = nextVar;
-        else { this._errorNf(nextVar); return; }
-    } else {
-        varName = keys[keys.length - 1];
+    const rest = command.length > 4 ? command.substring(4).trim() : '';
+    if (!rest) return this._nextOneVar(keys[keys.length - 1]);
+    const names = rest.split(',').map(s => s.trim()).filter(Boolean);
+    let result;
+    for (const name of names) {
+        result = this._nextOneVar(name);
+        if (result !== undefined && result !== null) {
+            // Looping back — remaining names wait for next NEXT
+            return result;
+        }
+        if (!this.programRunning && this.errValue) return undefined;
     }
+    return result;
+}
+
+_nextOneVar(nextVar) {
+    if (!Object.prototype.hasOwnProperty.call(this.forLoops, nextVar)) {
+        // Named NEXT when not innermost: pop frames above until match (JMR)
+        const keys = Object.keys(this.forLoops);
+        while (keys.length > 0) {
+            const top = keys[keys.length - 1];
+            if (top === nextVar) break;
+            delete this.forLoops[top];
+            keys.pop();
+        }
+        if (!Object.prototype.hasOwnProperty.call(this.forLoops, nextVar)) {
+            this._errorNf(nextVar);
+            return null;
+        }
+    }
+    const varName = nextVar;
     const loop = this.forLoops[varName];
     // Read from scalar variable so manual changes (e.g., AI=NA to break loop)
     // are respected — real TRS-80 BASIC reads the variable, not an internal copy
@@ -2242,9 +2573,12 @@ _cmdNext(command) {
     loop.current = this._getScalar(varName, loop.current) + loop.step;
     this._setScalar(varName, loop.current);
     if ((loop.step > 0 && loop.current <= loop.end) || (loop.step < 0 && loop.current >= loop.end)) {
+        if (this.debugMode) this.debugPrint(`NEXT ${varName} -> ${loop.current} (repeat)`);
         return loop.nextLineNumber;
     } else {
+        if (this.debugMode) this.debugPrint(`NEXT ${varName} -> done`);
         delete this.forLoops[varName];
+        return null;
     }
 }
 
@@ -2414,8 +2748,11 @@ _cmdDelay(command) {
 }
 
 _cmdRead(command) {
-    const variables = command.substring(4).split(',').map(s => s.trim());
-    for (const varName of variables) {
+    // NEW: top-level commas only — READ W(C,R) must stay one target (PAC_CS maze).
+    const variables = this._splitAllTopLevelCommas(command.substring(4).trim());
+    for (const raw of variables) {
+        const varName = raw.trim();
+        if (!varName) continue;
         if (this.dataPointer >= this.dataValues.length) { this._errorOd(); return; }
         let value = this.dataValues[this.dataPointer].trim();
         const arrayMatch = varName.match(this._re.arrayMatch);
@@ -2427,6 +2764,10 @@ _cmdRead(command) {
                 if (kind === 'S') this.arrayVariables[arrName][idx] = value.replace(/^['"]|['"]$/g, '');
                 else if (kind === 'I') this.arrayVariables[arrName][idx] = this._cint(this.evaluateExpression(value));
                 else this.arrayVariables[arrName][idx] = this.evaluateExpression(value);
+            } else if (!this.arrayVariables[arrName]) {
+                this._errorSn(`Array ${arrName} not defined`);
+            } else {
+                this._errorBs(arrName, idx);
             }
         } else {
             // NEW: READ respects DEFINT/DEFSTR
@@ -2443,12 +2784,14 @@ _cmdStop() {
     const ln = this._getCurrentLineNumber();
     this.printToScreen(`BREAK IN ${ln}`);
     this.programPaused = true;
+    this._contArmed = true; // NEW Sep 2026: CONT legal after STOP
     this._setStopBtn(true, 'CONT');
     this.enableImmediateMode();
 }
 
 _cmdEnd() {
     this.programRunning = false;
+    this._contArmed = false; // END disarms CONT (JMR)
     this._setStopBtn(false);
     this._flushGraphics();
 }
@@ -2539,9 +2882,20 @@ _populateGitHubDropdowns() {
     const selExamples = document.getElementById('selExamples');
     const selTape     = document.getElementById('selTape');
 
+    // ------------------------------------------------------------------
+    //  NOTE (authors / agents): BASIC programs are NOT in web_TRS_80/.
+    //  They live in ../Basic_Code_Examples/ (and Scott_Adams_Basic_version/).
+    //  When you write or edit a .bas file, debug it HERE:
+    //    open index.html → Examples or LOAD → RUN → use Debug panel.
+    //  Colon-split lines show as n.1 / n.2 in errors (e.g. ?BS IN 246.1).
+    //  Keep Python TRS80_Aug_10_26.py in sync for desktop parity.
+    // ------------------------------------------------------------------
     const basFiles = [
         'Basic_Code_Examples/Hello_world.bas',
         'Basic_Code_Examples/level2_selftest.bas',
+        'Basic_Code_Examples/Color_T.bas',
+        'Basic_Code_Examples/Sound_T.bas',
+        'Basic_Code_Examples/PAC_CS.bas',
         'Basic_Code_Examples/screentest.bas',
         'Basic_Code_Examples/Hi_Low.bas',
         'Basic_Code_Examples/hangman.bas',
@@ -2669,9 +3023,10 @@ async _loadFromGitHub(selectEl, type) {
 //  Expression Evaluator — mirrors evaluate_expression, _eval_nested
 // ------------------------------------------------------------------
 static PROTECTED_FUNCTIONS = new Set([
-    'SIN','COS','TAN','EXP','LOG','SQR','ABS','INT','RND',
+    'SIN','COS','TAN','ATN','EXP','LOG','SQR','ABS','INT','RND',
     'CHR$','STR$','LEFT$','RIGHT$','MID$','INSTR','LEN',
-    'ASC','VAL','PEEK','POINT','FIX','SGN','STRING$'
+    'ASC','VAL','PEEK','POINT','COLORAT','FIX','SGN','STRING$',
+    'CINT','CSNG','CDBL','POS','MEM','FRE'
 ]);
 
 evaluateExpression(expr) {
@@ -3069,7 +3424,8 @@ _wrapNotOps(expr) {
 // ------------------------------------------------------------------
 _initBuiltinFunctions() {
     this._builtinFunctions = {
-        'INT':     (v) => Math.trunc(Number(v)),
+        // Level II INT = floor toward -inf (not trunc toward 0)
+        'INT':     (v) => Math.floor(Number(v)),
         'SIN':     (v) => Math.sin(Number(v)),
         'COS':     (v) => Math.cos(Number(v)),
         'TAN':     (v) => Math.tan(Number(v)),
@@ -3085,6 +3441,12 @@ _initBuiltinFunctions() {
         'ASC':     (v) => String(v).charCodeAt(0) || 0,
         'PEEK':    (v) => this.peek(Math.trunc(Number(v))),
         'POINT':   (v, ie) => this._funcPoint(ie),
+        'COLORAT': (v, ie) => this._funcColorat(ie),
+        'CINT':    (v) => this._cint(v),
+        'CSNG':    (v) => Number(v),
+        'CDBL':    (v) => Number(v), // JMR: # / CDBL accepted as single
+        'POS':     () => this.cursorCol,
+        'MEM':     () => this._memBytes(),
         'LEN':     (v) => String(v).length,
         'STR$':    (v) => this._funcStr(v),
         'CHR$':    (v) => "'" + String.fromCharCode(Math.trunc(Number(v))).replace(/'/g, "\\'") + "'",
@@ -3143,9 +3505,31 @@ _funcPoint(innerExpr) {
         if (parts.length < 2) return 0;
         const x = Math.trunc(this._evalNested(parts[0].trim()));
         const y = Math.trunc(this._evalNested(parts[1].trim()));
-        // Level II BASIC: POINT uses 0..127, 0..47 (same as SET/RESET).
+        // Level II / JMR: OOB → ?FC (no wrap)
+        if (!(x >= 0 && x < 128 && y >= 0 && y < 48)) {
+            this._errorFc(`POINT(${x},${y}) off screen`);
+            return 0;
+        }
         return this.getPixel(x, y);
     } catch (e) { return 0; }
+}
+
+// NEW Sep 2026: COLORAT(x,y) — color-plane index 0..15 (JMR)
+_funcColorat(innerExpr) {
+    try {
+        const parts = this._splitAllTopLevelCommas(innerExpr);
+        if (parts.length < 2) return 0;
+        const x = Math.trunc(this._evalNested(parts[0].trim()));
+        const y = Math.trunc(this._evalNested(parts[1].trim()));
+        if (!(x >= 0 && x < 128 && y >= 0 && y < 48)) {
+            this._errorFc(`COLORAT(${x},${y}) off screen`);
+            return 0;
+        }
+        return this.colorMatrix[y][x] & 0xF;
+    } catch (e) {
+        this.debugPrint(`Error in COLORAT: ${e}`, 'error');
+        return 0;
+    }
 }
 
 _funcString(innerExpr) {
@@ -3213,6 +3597,20 @@ poke(address, value) {
             this.screenContent[row][col] = String.fromCharCode(value);
             this.drawChar(row, col, String.fromCharCode(value));
         }
+    } else if (address === IO_COLOR_FG) {
+        this.colorFg = value & 0xF;
+    } else if (address === IO_COLOR_BG) {
+        this.colorBg = value & 0xF;
+    } else if (address >= IO_PALETTE_BASE && address < IO_PALETTE_BASE + 32) {
+        // Two bytes per can: lo then hi nibble of RGB444
+        const idx = Math.trunc((address - IO_PALETTE_BASE) / 2);
+        if (idx >= 0 && idx <= 15) {
+            if ((address - IO_PALETTE_BASE) % 2 === 0) {
+                this.palette[idx] = (this.palette[idx] & 0xF00) | (value & 0xFF);
+            } else {
+                this.palette[idx] = (this.palette[idx] & 0x0FF) | ((value & 0x0F) << 8);
+            }
+        }
     }
 }
 
@@ -3230,6 +3628,32 @@ peek(address) {
         const row = Math.trunc(screenPos / COLS);
         const col = screenPos % COLS;
         if (row < ROWS) return this.screenContent[row][col].charCodeAt(0);
+    } else if (address === IO_COLOR_FG) {
+        return this.colorFg & 0xF;
+    } else if (address === IO_COLOR_BG) {
+        return this.colorBg & 0xF;
+    } else if (address >= IO_PALETTE_BASE && address < IO_PALETTE_BASE + 32) {
+        const idx = Math.trunc((address - IO_PALETTE_BASE) / 2);
+        if (idx >= 0 && idx <= 15) {
+            const rgb = this.palette[idx];
+            if ((address - IO_PALETTE_BASE) % 2 === 0) return rgb & 0xFF;
+            return (rgb >> 8) & 0x0F;
+        }
+        return 0;
+    } else if (address === IO_SOUND_FREQ_LO) {
+        return this._soundFreq & 0xFF;
+    } else if (address === IO_SOUND_FREQ_HI) {
+        return (this._soundFreq >> 8) & 0xFF;
+    } else if (address === IO_SOUND_DUR_LO) {
+        return this._soundDur & 0xFF;
+    } else if (address === IO_SOUND_DUR_HI) {
+        return (this._soundDur >> 8) & 0xFF;
+    } else if (address === IO_SOUND_CTRL) {
+        return this._soundCtrlByte();
+    } else if (address === IO_SOUND_QCNT_LO) {
+        return this._soundQueue.length & 0xFF;
+    } else if (address === IO_SOUND_QCNT_HI) {
+        return (this._soundQueue.length >> 8) & 0x03;
     }
     return 0;
 }
@@ -3241,28 +3665,37 @@ inkey() {
 }
 
 // ------------------------------------------------------------------
-//  Graphics — SET / RESET / POINT
+//  Graphics — SET / RESET / POINT + JMR color plane
 // ------------------------------------------------------------------
-setPixel(x, y) {
-    if (x >= 0 && x < 128 && y >= 0 && y < 48) {
-        this.pixelMatrix[y][x] = 1;
-        this._writeGfxPixelInBuffer(x, y, true);
-        this.activePixels.add(y * 128 + x);
-        this._gfxDirty = true;
-        this._gfxBatchCount++;
-        if (this._gfxBatchCount >= GRAPHICS_PENDING_BATCH) this._flushGraphicsQuick();
+setPixel(x, y, color = null) {
+    // NEW Sep 2026: OOB → ?FC (JMR/Level II — no wrap into VRAM)
+    if (!(x >= 0 && x < 128 && y >= 0 && y < 48)) {
+        this._errorFc(`SET(${x},${y}) off screen`);
+        return;
     }
+    const c = color === null ? this.colorFg : (color & 0xF);
+    this.pixelMatrix[y][x] = 1;
+    this.colorMatrix[y][x] = c;
+    this._writeGfxPixelInBuffer(x, y, c);
+    this.activePixels.add(y * 128 + x);
+    this._gfxDirty = true;
+    this._gfxBatchCount++;
+    if (this._gfxBatchCount >= GRAPHICS_PENDING_BATCH) this._flushGraphicsQuick();
 }
 
 resetPixel(x, y) {
-    if (x >= 0 && x < 128 && y >= 0 && y < 48) {
-        this.pixelMatrix[y][x] = 0;
-        this._writeGfxPixelInBuffer(x, y, false);
-        this.activePixels.delete(y * 128 + x);
-        this._gfxDirty = true;
-        this._gfxBatchCount++;
-        if (this._gfxBatchCount >= GRAPHICS_PENDING_BATCH) this._flushGraphicsQuick();
+    if (!(x >= 0 && x < 128 && y >= 0 && y < 48)) {
+        this._errorFc(`RESET(${x},${y}) off screen`);
+        return;
     }
+    const bg = this.colorBg & 0xF;
+    this.pixelMatrix[y][x] = 0;
+    this.colorMatrix[y][x] = bg; // RESET paints BG into color plane (JMR)
+    this._writeGfxPixelInBuffer(x, y, bg);
+    this.activePixels.delete(y * 128 + x);
+    this._gfxDirty = true;
+    this._gfxBatchCount++;
+    if (this._gfxBatchCount >= GRAPHICS_PENDING_BATCH) this._flushGraphicsQuick();
 }
 
 // Quick flush — one scaled bitmap blit to screenGfx only (text layer unchanged; Mar 2026 perf plan).
@@ -3287,6 +3720,142 @@ getPixel(x, y) {
     if (x >= 0 && x < 128 && y >= 0 && y < 48)
         return this.pixelMatrix[y][x] ? -1 : 0;
     return 0;
+}
+
+// ============================================================
+//  SECTION: Sound (JMR queued SOUND/BEEP — Web Audio API)
+// ============================================================
+_soundCtrlByte() {
+    // B4D4: bit0=running bit1=full bit2=busy (FM: busy only for continuous).
+    const qn = this._soundQueue.length;
+    let ctrl = 0;
+    if (this._soundRunning) {
+        ctrl |= 0x01;
+        ctrl |= 0x04; // continuous tone keeps busy
+    }
+    if (qn >= SOUND_QUEUE_DEPTH) ctrl |= 0x02;
+    return ctrl;
+}
+
+_soundEnqueue(freqHz, durationMs) {
+    if (freqHz === 0) {
+        this._soundStopAll();
+        return;
+    }
+    if (this._soundQueue.length >= SOUND_QUEUE_DEPTH) {
+        return; // drop when full (silicon stalls; host just ignores)
+    }
+    this._soundFreq = freqHz | 0;
+    this._soundDur = durationMs | 0;
+    this._soundQueue.push([this._soundFreq, this._soundDur]);
+    // FM: continuous (ms=0) stays running; timed notes finish for host wait loops
+    this._soundRunning = (durationMs === 0);
+    this._soundEnsurePlayer();
+}
+
+_soundStopAll() {
+    // SOUND 0 — stop current note and flush queue.
+    this._soundStopFlag = true;
+    this._soundQueue = [];
+    this._soundRunning = false;
+    this._soundFreq = 0;
+    this._soundDur = 0;
+    this._soundStopOsc();
+    this._soundStopFlag = false;
+}
+
+_ensureAudioCtx() {
+    if (!this._audioCtx) {
+        const AC = window.AudioContext || window.webkitAudioContext;
+        if (!AC) return null;
+        this._audioCtx = new AC();
+    }
+    if (this._audioCtx.state === 'suspended') {
+        try { this._audioCtx.resume(); } catch (_) {}
+    }
+    return this._audioCtx;
+}
+
+_soundStopOsc() {
+    if (this._soundOsc) {
+        try { this._soundOsc.stop(); } catch (_) {}
+        try { this._soundOsc.disconnect(); } catch (_) {}
+        this._soundOsc = null;
+    }
+    if (this._soundGain) {
+        try { this._soundGain.disconnect(); } catch (_) {}
+        this._soundGain = null;
+    }
+}
+
+_soundEnsurePlayer() {
+    if (this._soundPlaying) return;
+    this._soundPlaying = true;
+    this._soundPlayerLoop();
+}
+
+async _soundPlayerLoop() {
+    // Play queued square tones via OscillatorNode (async queue player).
+    while (true) {
+        if (this._soundQueue.length === 0) {
+            this._soundRunning = false;
+            this._soundPlaying = false;
+            break;
+        }
+        const [freq, dur] = this._soundQueue.shift();
+        this._soundFreq = freq;
+        this._soundDur = dur;
+        this._soundRunning = (dur === 0);
+        if (this._soundStopFlag) continue;
+        // Continuous: play until stop or next note — host uses short chunks
+        const playMs = dur === 0 ? 500 : Math.max(1, dur);
+        try {
+            await this._playToneWebAudio(freq, playMs);
+        } catch (_) {}
+        // Continuous: keep re-queuing front until SOUND 0
+        if (dur === 0 && !this._soundStopFlag && this._soundRunning) {
+            this._soundQueue.unshift([freq, 0]);
+        }
+    }
+}
+
+_playToneWebAudio(freqHz, durationMs) {
+    return new Promise((resolve) => {
+        let done = false;
+        const finish = () => { if (!done) { done = true; resolve(); } };
+        if (freqHz < 1) {
+            setTimeout(finish, durationMs);
+            return;
+        }
+        const ctx = this._ensureAudioCtx();
+        if (!ctx) {
+            setTimeout(finish, durationMs);
+            return;
+        }
+        this._soundStopOsc();
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = 'square';
+        osc.frequency.value = freqHz;
+        gain.gain.value = 0.08;
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        this._soundOsc = osc;
+        this._soundGain = gain;
+        const startAt = ctx.currentTime;
+        const endAt = startAt + durationMs / 1000;
+        osc.start(startAt);
+        osc.stop(endAt);
+        osc.onended = () => {
+            if (this._soundOsc === osc) {
+                this._soundOsc = null;
+                this._soundGain = null;
+            }
+            finish();
+        };
+        // Safety timeout if onended missed
+        setTimeout(finish, durationMs + 50);
+    });
 }
 
 // ------------------------------------------------------------------
@@ -3564,6 +4133,9 @@ _errorNf(v) {
 _errorRg() {
     this._raiseError(3, 'RG');
 }
+_errorCn() {
+    this._raiseError(17, 'CN');
+}
 
 // ------------------------------------------------------------------
 //  Utilities
@@ -3728,7 +4300,7 @@ _newBtn() {
         this.programPaused  = false;
         this._setStopBtn(false);
     }
-    this.newProgram();
+    this.newProgram(true); // NEW restores FG=1 BG=0 + default palette (JMR)
     this.storedProgram = [];
     this.inputArea.value = '';
     this.enableImmediateMode();

@@ -6,6 +6,8 @@
 
 Two faithful TRS-80 Model I Level II BASIC emulators — a **Python desktop app** (Tkinter) and a **browser-based JavaScript version** — that run vintage BASIC programs on a green-on-black 64x16 text / 128x48 graphics display. Both support tape I/O (`INPUT#-1` / `PRINT#-1`) for loading data files, and both include a built-in debugger.
 
+**JMR FPGA parity (Sep 2026):** both interpreters also implement the FPGA dialect’s **color plane** (`COLOR` / `COLORAT` / colored `SET`), **queued `SOUND`/`BEEP`**, and Level II trap fixes (FOR same-var reclaim, SET/POINT OOB `?FC`). Same programs as `JMR-BASIC-FPGA-COMPUTER-1` — try `Basic_Code_Examples/level2_selftest.bas`, `Color_T.bas`, `Sound_T.bas`.
+
 The flagship demo is **SCOTTADV.BAS**, a ~580-line BASIC program that plays all 18 classic Scott Adams text adventure games from their original ScottFree `.dat` files.
 
 ![Screen layout](https://img.shields.io/badge/display-64x16_text_%7C_128x48_graphics-green)
@@ -16,7 +18,7 @@ The flagship demo is **SCOTTADV.BAS**, a ~580-line BASIC program that plays all 
 
 | Version | Location | How to run |
 |---------|----------|------------|
-| **Python (desktop)** | `TRS80_July_27_26.py` | `pip install -r requirements.txt && python TRS80_July_27_26.py` |
+| **Python (desktop)** | `TRS80_Aug_10_26.py` | `pip install -r requirements.txt && python TRS80_Aug_10_26.py` |
 | **JavaScript (browser)** | `web_TRS_80/index.html` | Open in any browser — no server needed |
 | **Live online demo** | `docs/index.html` | **[jmrothberg.github.io/TRS-80-Simulator](https://jmrothberg.github.io/TRS-80-Simulator/)** |
 
@@ -81,7 +83,7 @@ The crown jewel of this project: a complete Scott Adams adventure engine written
 3. Click **RUN** → press Enter when prompted → the adventure loads!
 
 **Python version:**
-1. Launch `python TRS80_July_27_26.py`
+1. Launch `python TRS80_Aug_10_26.py`
 2. Type `LOAD` on the green screen → select `SCOTTADV.BAS`
 3. Type `RUN` → press Enter → select the `.dat` file when the dialog appears
 
