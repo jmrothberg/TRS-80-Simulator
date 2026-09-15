@@ -53,6 +53,8 @@
 #                  SET/POINT OOB ?FC, NEXT multi-var, RANDOM/CINT/CSNG/CDBL/POS,
 #                  CONT ?CN, RUN line (no CLS)
 #    Sep 14 2026 - V2.0 banner; HELP / HELP BASIC / VERSION (cleaned FPGA text)
+#    Sep 14 2026 - Match FPGA glass: spaces do not paint opaque paper over SET
+#                  pixels (PAC_CS title swatches); Level II 2-char names (SCX=SC)
 #    Aug 10 2026 - OPEN "I": if not in RAM _seq_files, load from host disk
 #                  (program dir / Basic_Code_Examples / cwd) so ADVENT CAVE.DAT works
 #
@@ -1536,6 +1538,8 @@ class TRS80Simulator:
                     continue
             self.screen_content[self.cursor_row][self.cursor_col] = char
             row, col = self.cursor_row, self.cursor_col
+            # Level II / FPGA: PRINT into a cell replaces SET graphics there
+            self._clear_gfx_cell(row, col)
             chars_to_draw.append((col * char_w, row * char_h, char, row, col))
             self.cursor_col += 1
 
@@ -1545,18 +1549,41 @@ class TRS80Simulator:
         bg = self._bg_hex()
         for x, y, char, row, col in chars_to_draw:
             tag = f"c{row}_{col}"
-            items = screen.find_withtag(tag)
-            if items:
-                screen.itemconfigure(items[0], text=char, fill=fg)
-            else:
+            bg_tag = f"bg{row}_{col}"
+            screen.delete(tag)
+            screen.delete(bg_tag)
+            if char != ' ':
+                # Opaque paper only under real glyphs — spaces stay clear so SET shows (FPGA)
                 screen.create_rectangle(x, y, x + char_w, y + char_h,
-                    fill=bg, outline=bg)
-                if char != ' ':
-                    screen.create_text(x, y, text=char,
-                        font=font, fill=fg, anchor="nw",
-                        tags=(tag, self.CANVAS_TEXT_LAYER_TAG))
+                    fill=bg, outline=bg, tags=(bg_tag,))
+                screen.create_text(x, y, text=char,
+                    font=font, fill=fg, anchor="nw",
+                    tags=(tag, self.CANVAS_TEXT_LAYER_TAG))
 
         self.update_cursor_display()
+
+    def _clear_gfx_cell(self, row, col):
+        """Clear the 2×3 SET pixels for one text cell (PRINT replaces graphics)."""
+        if not (0 <= row < 16 and 0 <= col < 64):
+            return
+        bg = self.color_bg & 0xF
+        gx, gy = col * 2, row * 3
+        for dy in range(3):
+            for dx in range(2):
+                x, y = gx + dx, gy + dy
+                self.pixel_matrix[y][x] = 0
+                self.color_matrix[y][x] = bg
+                self._active_pixels.discard((x, y))
+                self._pending_graphics.append(('reset', x, y, bg))
+
+    def _punch_text_for_gfx_pixel(self, x, y):
+        """SET owns the cell — remove opaque text/paper covering it (match FPGA)."""
+        col, row = x // 2, y // 3
+        if not (0 <= row < 16 and 0 <= col < 64):
+            return
+        self.screen_content[row][col] = ' '
+        self.screen.delete(f"c{row}_{col}")
+        self.screen.delete(f"bg{row}_{col}")
 
 
     def redraw_screen(self):
@@ -2910,6 +2937,7 @@ class TRS80Simulator:
             array_match = self._regex_cache['array_match'].match(var_name)
             if array_match:
                 array_name, index = array_match.groups()
+                array_name = self._level2_array_name(array_name)
                 index = self._compute_array_linear_index(array_name, index)
                 if array_name in self.array_variables:
                     if 0 <= index < len(self.array_variables[array_name]):
@@ -3169,6 +3197,7 @@ class TRS80Simulator:
         m = self._regex_cache['array_match'].fullmatch(var_spec)
         if m:
             array_name, index_expr = m.groups()
+            array_name = self._level2_array_name(array_name)
             index = self._compute_array_linear_index(array_name, index_expr)
             if array_name not in self.array_variables:
                 self.debug_print(f"Error: Array {array_name} not defined", 'error')
@@ -3232,6 +3261,7 @@ class TRS80Simulator:
         match = self._regex_cache['dim'].match(command)
         if match:
             array_name, size_expr = match.groups()
+            array_name = self._level2_array_name(array_name)
             size_expr = size_expr.strip()
             left, right = self._split_top_level_comma(size_expr)
             if right is None:
@@ -3251,8 +3281,11 @@ class TRS80Simulator:
                 else:
                     self.array_variables[array_name] = [0] * total
                 self.array_dimensions[array_name] = (d1, d2)
-            # Optimization 6: Pre-compile array pattern for this array
-            self._array_patterns[array_name] = re.compile(rf'\b{re.escape(array_name)}\(')
+            # Allow GHOST( to hit stored GH( — FPGA Level II ignores chars after first two
+            if array_name.endswith('$'):
+                self._array_patterns[array_name] = re.compile(rf'\b{re.escape(array_name)}\(')
+            else:
+                self._array_patterns[array_name] = re.compile(rf'\b{re.escape(array_name)}[A-Z0-9]*\(')
             self.debug_print(f"Array {array_name} dimensioned ({len(self.array_variables[array_name])} elements)")
         else:
             self._error_sn(f"Invalid DIM command: {command}")
@@ -3380,6 +3413,7 @@ class TRS80Simulator:
         match = self._regex_cache['for_loop'].match(command)
         if match:
             var, start_expr, end_expr, _, step_expr = match.groups()
+            var = self._parse_var_type(var)[0]  # Level II / FPGA: 2-char name
             start = self.evaluate_expression(start_expr)
             end = self.evaluate_expression(end_expr)
             step = self.evaluate_expression(step_expr) if step_expr else 1
@@ -3410,7 +3444,7 @@ class TRS80Simulator:
         if not rest:
             return self._next_one_var(next(reversed(self.for_loops)))
         # Comma-separated: step each named var left-to-right
-        names = [n.strip() for n in rest.split(',') if n.strip()]
+        names = [self._parse_var_type(n.strip())[0] for n in rest.split(',') if n.strip()]
         result = None
         for name in names:
             result = self._next_one_var(name)
@@ -3523,6 +3557,7 @@ class TRS80Simulator:
                 array_match = self._regex_cache['array_match'].match(var)
                 if array_match:
                     array_name, index = array_match.groups()
+                    array_name = self._level2_array_name(array_name)
                     index = self._compute_array_linear_index(array_name, index)
                     if array_name in self.array_variables:
                         if 0 <= index < len(self.array_variables[array_name]):
@@ -3559,20 +3594,34 @@ class TRS80Simulator:
     # slots unless the default type makes bare NAME share that slot.
     # ------------------------------------------------------------------
     def _parse_var_type(self, name):
-        """Return (base_name, spelled_type|None). Spelled: I/F/S/D."""
-        name = (name or '').strip()
+        """Return (base_name, spelled_type|None). Spelled: I/F/S/D.
+
+        Level II / JMR FPGA: only the first two characters of the name are
+        significant (SCX and SC share one slot).
+        """
+        name = (name or '').strip().upper()
         if not name:
             return '', None
         suf = name[-1]
         if suf == '%':
-            return name[:-1], 'I'
-        if suf == '!':
-            return name[:-1], 'F'
-        if suf == '#':
-            return name[:-1], 'D'  # accepted as single (ROADMAP)
-        if suf == '$':
-            return name[:-1], 'S'
-        return name, None
+            base, spelled = name[:-1], 'I'
+        elif suf == '!':
+            base, spelled = name[:-1], 'F'
+        elif suf == '#':
+            base, spelled = name[:-1], 'D'  # accepted as single (ROADMAP)
+        elif suf == '$':
+            base, spelled = name[:-1], 'S'
+        else:
+            base, spelled = name, None
+        if len(base) > 2:
+            base = base[:2]
+        return base, spelled
+
+    def _level2_array_name(self, name):
+        name = (name or '').strip().upper()
+        if name.endswith('$'):
+            return self._parse_var_type(name)[0] + '$'
+        return self._parse_var_type(name)[0]
 
     def _resolve_var_kind(self, name):
         """Resolved kind I/F/S — DEFDBL/# → F (JMR resolve_type)."""
@@ -4172,11 +4221,15 @@ class TRS80Simulator:
         # and replaces with the array value.  Skipped entirely when there
         # are no parentheses or no arrays defined.
         if '(' in expr and self.array_variables:
-            for array_name in self.array_variables:
+            # Longest name first so WW( is not eaten by W[A-Z0-9]*
+            for array_name in sorted(self.array_variables, key=len, reverse=True):
                 if isinstance(self.array_variables[array_name], list):
                     # Use cached compiled pattern per array name
                     if array_name not in self._array_patterns:
-                        self._array_patterns[array_name] = re.compile(rf'\b{re.escape(array_name)}\(')
+                        if array_name.endswith('$'):
+                            self._array_patterns[array_name] = re.compile(rf'\b{re.escape(array_name)}\(')
+                        else:
+                            self._array_patterns[array_name] = re.compile(rf'\b{re.escape(array_name)}[A-Z0-9]*\(')
                     array_re = self._array_patterns[array_name]
                     start = 0
                     while True:
@@ -4777,6 +4830,8 @@ class TRS80Simulator:
         self.color_matrix[y][x] = c
         self._pending_graphics.append(('set', x, y, c))
         self._active_pixels.add((x, y))
+        # FPGA: SET owns the cell — text paper must not cover the color plane
+        self._punch_text_for_gfx_pixel(x, y)
         if len(self._pending_graphics) >= _GRAPHICS_PENDING_BATCH:
             self._flush_graphics()
 
@@ -4789,6 +4844,7 @@ class TRS80Simulator:
         self.color_matrix[y][x] = bg  # RESET paints BG into color plane (JMR)
         self._pending_graphics.append(('reset', x, y, bg))
         self._active_pixels.discard((x, y))
+        self._punch_text_for_gfx_pixel(x, y)
         if len(self._pending_graphics) >= _GRAPHICS_PENDING_BATCH:
             self._flush_graphics()
     

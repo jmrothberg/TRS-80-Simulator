@@ -139,6 +139,8 @@ canvas { display: block; cursor: text; image-rendering: pixelated; }
 //  TRS-80 Model I Level II BASIC Simulator — Web Edition
 //  Ported from TRS80_Aug_10_26.py by Jonathan Rothberg (JMR)
 //  V2.0 — JMR FPGA parity: COLOR / SOUND / arrows / HELP / VERSION
+//  Sep 14 2026 — Level II gold: SET shows through spaces (text layer must not
+//    paint opaque paper over gfx); only first two chars of a name significant
 // ===================================================================
 
 // Boot banner + VERSION (mirrors JMR FPGA machine.BANNER; host V2.0)
@@ -878,19 +880,51 @@ _drawTextLayerFromScreenContent() {
     }
 }
 
+// Level II: a text write replaces the whole character cell (2×3 SET pixels).
+_clearGfxCell(row, col) {
+    const gx = col * 2, gy = row * 3;
+    const bg = this.colorBg & 0xF;
+    for (let dy = 0; dy < 3; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+            const x = gx + dx, y = gy + dy;
+            this.pixelMatrix[y][x] = 0;
+            this.colorMatrix[y][x] = bg;
+            this._writeGfxPixelInBuffer(x, y, bg);
+            this.activePixels.delete(y * 128 + x);
+        }
+    }
+    this._gfxDirty = true;
+}
+
+// Spaces must be transparent on the text canvas so SET pixels (layer below) show.
+_clearTextCell(row, col) {
+    this.ctxText.clearRect(col * this.charW, row * this.charH, this.charW, this.charH);
+}
+
+// SET/RESET owns the cell — punch out any opaque glyph/paper covering it.
+_punchTextForGfxPixel(x, y) {
+    const col = x >> 1, row = (y / 3) | 0;
+    if (row < 0 || row >= ROWS || col < 0 || col >= COLS) return;
+    this.screenContent[row][col] = ' ';
+    this._clearTextCell(row, col);
+}
+
 drawChar(row, col, char) {
     const x = col * this.charW;
     const y = row * this.charH;
     const ctx = this.ctxText;
-    // Paper uses BG; ink uses FG (JMR color)
+    this._clearGfxCell(row, col);
+    if (!char || char === ' ') {
+        this._clearTextCell(row, col);
+        return;
+    }
+    // Paper uses BG; ink uses FG (JMR color) — opaque only for real glyphs
     ctx.fillStyle = this._bgHex();
     ctx.fillRect(x, y, this.charW, this.charH);
-    if (char && char !== ' ') {
-        ctx.fillStyle = this._fgHex();
-        ctx.font = this.screenFont;
-        ctx.textBaseline = 'top';
-        ctx.fillText(char, x + 1, y + 1);
-    }
+    ctx.fillStyle = this._fgHex();
+    ctx.font = this.screenFont;
+    ctx.textBaseline = 'top';
+    ctx.fillText(char, x + 1, y + 1);
 }
 
 printToScreen(text, end = '\n') {
@@ -908,12 +942,18 @@ printToScreen(text, end = '\n') {
             }
             if (char === '\n') continue;
         }
-        this.screenContent[this.cursorRow][this.cursorCol] = char;
-        const x = this.cursorCol * this.charW;
-        const y = this.cursorRow * this.charH;
-        ctx.fillStyle = bg;
-        ctx.fillRect(x, y, this.charW, this.charH);
-        if (char !== ' ') {
+        const row = this.cursorRow, col = this.cursorCol;
+        this.screenContent[row][col] = char;
+        // Level II: PRINT into a cell replaces SET graphics there
+        this._clearGfxCell(row, col);
+        if (char === ' ') {
+            // NEW Sep 2026: do NOT paint opaque paper — that hid SET swatches (PAC_CS title)
+            this._clearTextCell(row, col);
+        } else {
+            const x = col * this.charW;
+            const y = row * this.charH;
+            ctx.fillStyle = bg;
+            ctx.fillRect(x, y, this.charW, this.charH);
             ctx.fillStyle = fg;
             ctx.font = this.screenFont;
             ctx.textBaseline = 'top';
@@ -2006,7 +2046,8 @@ _cmdLet(command) {
 
     const arrayMatch = varName.match(this._re.arrayMatch);
     if (arrayMatch) {
-        const [, arrayName, indexExpr] = arrayMatch;
+        const arrayName = this._level2ArrayName(arrayMatch[1]);
+        const indexExpr = arrayMatch[2];
         const index = this._computeArrayLinearIndex(arrayName, indexExpr);
         if (this.arrayVariables[arrayName]) {
             if (index >= 0 && index < this.arrayVariables[arrayName].length) {
@@ -2214,7 +2255,8 @@ _assignInputValue(varSpec, valueStr) {
     const spec = varSpec.trim();
     const arrayMatch = spec.match(this._re.arrayMatch);
     if (arrayMatch) {
-        const [, arrayName, indexExpr] = arrayMatch;
+        const arrayName = this._level2ArrayName(arrayMatch[1]);
+        const indexExpr = arrayMatch[2];
         const index = this._computeArrayLinearIndex(arrayName, indexExpr);
         if (this.arrayVariables[arrayName] && index >= 0 && index < this.arrayVariables[arrayName].length) {
             // NEW: INPUT array element respects DEFINT/DEFSTR
@@ -2261,7 +2303,7 @@ _computeArrayLinearIndex(arrayName, indexExpr) {
 _cmdDim(command) {
     const m = command.match(this._re.dim);
     if (m) {
-        const arrayName = m[1];
+        const arrayName = this._level2ArrayName(m[1]);
         const sizeExpr = m[2].trim();
         const commaPos = this._findUnquotedComma(sizeExpr);
         if (commaPos === -1) {
@@ -2279,7 +2321,10 @@ _cmdDim(command) {
                 : Array(total).fill(0);
             this.arrayDimensions[arrayName] = [d1, d2];
         }
-        this._arrayPatterns[arrayName] = new RegExp('\\b' + arrayName.replace('$', '\\$') + '\\(');
+        // Allow GHOST( to match stored GH( — Level II ignores chars after the first two
+        this._arrayPatterns[arrayName] = new RegExp(
+            '\\b' + arrayName.replace('$', '\\$') + (arrayName.endsWith('$') ? '' : '[A-Z0-9]*') + '\\('
+        );
         this.debugPrint(`Array ${arrayName} dimensioned (${this.arrayVariables[arrayName].length} elements)`);
     }
 }
@@ -2300,14 +2345,25 @@ _cmdDef(command) {
 // Storage keys: integer→NAME%, string→NAME$, single→NAME (bare).
 // ------------------------------------------------------------------
 _parseVarType(name) {
-    name = String(name || '').trim();
+    name = String(name || '').trim().toUpperCase();
     if (!name) return ['', null];
     const suf = name[name.length - 1];
-    if (suf === '%') return [name.slice(0, -1), 'I'];
-    if (suf === '!') return [name.slice(0, -1), 'F'];
-    if (suf === '#') return [name.slice(0, -1), 'D']; // accepted as single
-    if (suf === '$') return [name.slice(0, -1), 'S'];
-    return [name, null];
+    let base, spelled;
+    if (suf === '%') { base = name.slice(0, -1); spelled = 'I'; }
+    else if (suf === '!') { base = name.slice(0, -1); spelled = 'F'; }
+    else if (suf === '#') { base = name.slice(0, -1); spelled = 'D'; } // accepted as single
+    else if (suf === '$') { base = name.slice(0, -1); spelled = 'S'; }
+    else { base = name; spelled = null; }
+    // Level II / real TRS-80: only the first two characters are significant
+    // (SCX and SC are the same variable — HTML used to keep the full name).
+    if (base.length > 2) base = base.slice(0, 2);
+    return [base, spelled];
+}
+
+_level2ArrayName(name) {
+    name = String(name || '').trim().toUpperCase();
+    if (name.endsWith('$')) return this._parseVarType(name)[0] + '$';
+    return this._parseVarType(name)[0];
 }
 
 _resolveVarKind(name) {
@@ -2516,7 +2572,8 @@ _splitOnUnquotedColons(text) {
 _cmdFor(command) {
     const m = command.match(this._re.forLoop);
     if (m) {
-        const varName = m[1];
+        // Level II 2-char name — FOR SCX and FOR SC share one frame slot
+        const varName = this._parseVarType(m[1])[0];
         const start = this.evaluateExpression(m[2]);
         const end   = this.evaluateExpression(m[3]);
         const step  = m[5] ? this.evaluateExpression(m[5]) : 1;
@@ -2537,7 +2594,7 @@ _cmdNext(command) {
     if (keys.length === 0) { this._errorNf(''); return; }
     const rest = command.length > 4 ? command.substring(4).trim() : '';
     if (!rest) return this._nextOneVar(keys[keys.length - 1]);
-    const names = rest.split(',').map(s => s.trim()).filter(Boolean);
+    const names = rest.split(',').map(s => this._parseVarType(s.trim())[0]).filter(Boolean);
     let result;
     for (const name of names) {
         result = this._nextOneVar(name);
@@ -2757,7 +2814,8 @@ _cmdRead(command) {
         let value = this.dataValues[this.dataPointer].trim();
         const arrayMatch = varName.match(this._re.arrayMatch);
         if (arrayMatch) {
-            const [, arrName, idxExpr] = arrayMatch;
+            const arrName = this._level2ArrayName(arrayMatch[1]);
+            const idxExpr = arrayMatch[2];
             const idx = this._computeArrayLinearIndex(arrName, idxExpr);
             if (this.arrayVariables[arrName] && idx >= 0 && idx < this.arrayVariables[arrName].length) {
                 const kind = this._resolveVarKind(arrName);
@@ -3171,10 +3229,14 @@ _evalNested(expr) {
 
     // Stage 5: Array reference substitution
     if (expr.includes('(') && Object.keys(this.arrayVariables).length > 0) {
-        for (const arrayName of Object.keys(this.arrayVariables)) {
+        // Longest name first so WW( is not eaten by W[A-Z0-9]*
+        const arrayNames = Object.keys(this.arrayVariables).sort((a, b) => b.length - a.length);
+        for (const arrayName of arrayNames) {
             if (!Array.isArray(this.arrayVariables[arrayName])) continue;
             if (!this._arrayPatterns[arrayName]) {
-                this._arrayPatterns[arrayName] = new RegExp('\\b' + arrayName.replace('$', '\\$') + '\\(');
+                this._arrayPatterns[arrayName] = new RegExp(
+                    '\\b' + arrayName.replace('$', '\\$') + (arrayName.endsWith('$') ? '' : '[A-Z0-9]*') + '\\('
+                );
             }
             const arrayRe = this._arrayPatterns[arrayName];
             let searchStart = 0;
@@ -3678,6 +3740,8 @@ setPixel(x, y, color = null) {
     this.colorMatrix[y][x] = c;
     this._writeGfxPixelInBuffer(x, y, c);
     this.activePixels.add(y * 128 + x);
+    // FPGA: SET owns the cell — text paper must not cover the color plane
+    this._punchTextForGfxPixel(x, y);
     this._gfxDirty = true;
     this._gfxBatchCount++;
     if (this._gfxBatchCount >= GRAPHICS_PENDING_BATCH) this._flushGraphicsQuick();
@@ -3693,6 +3757,7 @@ resetPixel(x, y) {
     this.colorMatrix[y][x] = bg; // RESET paints BG into color plane (JMR)
     this._writeGfxPixelInBuffer(x, y, bg);
     this.activePixels.delete(y * 128 + x);
+    this._punchTextForGfxPixel(x, y);
     this._gfxDirty = true;
     this._gfxBatchCount++;
     if (this._gfxBatchCount >= GRAPHICS_PENDING_BATCH) this._flushGraphicsQuick();
