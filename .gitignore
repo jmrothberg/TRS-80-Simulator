@@ -66,6 +66,10 @@ Desktop.ini
 # Tape files (virtual cassette data)
 *.tape
 
+# Downloaded BASIC archive and the generated training JSONL (too large for git)
+level2_corpus/raw/
+level2_corpus/out/*.jsonl
+
 # Local model directories (too large for git)
 Models_Transformer/
 

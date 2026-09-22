@@ -1,0 +1,13 @@
+Level II BASIC continued-pretraining corpus
+target checkpoint: Qwen/Qwen3.8-27B
+row shape: {"text": "<one program>"}
+files_seen 14743
+programs_kept 9160
+exact_dupes 1910
+dropped 3673
+train_rows 9074
+val_rows 86
+text_bytes 58596490
+from_repo 28
+from_willus 657
+from_classiccmp 8475

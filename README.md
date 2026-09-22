@@ -146,6 +146,7 @@ The interpreter reads the standard ScottFree ASCII `.dat` format. Additional `.d
 | `TRS80LLMSupport.py` | Optional AI companion window (Claude API, Ollama, HuggingFace) |
 | `Hailo_for_Pi/` | Hailo-10H AI accelerator support for Raspberry Pi |
 | `TRS80_BASIC_REFERENCE.md` | Language reference for the supported BASIC dialect |
+| `basictraining.md` | How to build and train on the Level II BASIC JSONL set |
 | `requirements.txt` | Python dependencies |
 
 ---
@@ -310,6 +311,10 @@ Then `chmod +x dist/TRS80.command`. Double-click the `.command` file in Finder t
 > **Note:** The LLM companion (`TRS80LLMSupport.py`) is lazy-imported at runtime, so its heavy dependencies (torch, transformers, etc.) are excluded from the build. The simulator itself runs without them. If you need LLM support in the packaged build, remove the corresponding `--exclude-module` flags and expect a ~500 MB binary.
 
 ---
+
+## Level II training corpus
+
+The continued-pretraining set for `Qwen/Qwen3.8-27B` is documented in [basictraining.md](basictraining.md). Build it with `python level2_corpus/build.py`. The training rows are `level2_corpus/out/train.jsonl` and `level2_corpus/out/val.jsonl`.
 
 ## License
 

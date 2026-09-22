@@ -1,0 +1,12 @@
+GW-BASIC continued-pretraining corpus
+dialect tag: 0 REM DIALECT GW-BASIC
+target checkpoint: Qwen/Qwen3.8-27B
+row shape: {"text": "<one program>"}
+source: robhagemans/hoard-of-gwbasic
+files_seen 3010
+programs_kept 2281
+exact_dupes 257
+dropped 472
+train_rows 2257
+val_rows 24
+text_bytes 17458306
