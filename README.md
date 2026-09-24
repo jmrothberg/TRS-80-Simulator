@@ -19,6 +19,7 @@ The flagship demo is **SCOTTADV.BAS**, a ~580-line BASIC program that plays all 
 | Version | Location | How to run |
 |---------|----------|------------|
 | **Python (desktop)** | `TRS80_Aug_10_26.py` | `pip install -r requirements.txt && python TRS80_Aug_10_26.py` |
+| **MicroPython (ESP32)** | [`microTRS-80/`](microTRS-80/) | Copy files to the board; see [board setup](microTRS-80/README.md) |
 | **JavaScript (browser)** | `web_TRS_80/index.html` | Open in any browser — no server needed |
 | **Live online demo** | `docs/index.html` | **[jmrothberg.github.io/TRS-80-Simulator](https://jmrothberg.github.io/TRS-80-Simulator/)** |
 
