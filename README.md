@@ -314,7 +314,7 @@ Then `chmod +x dist/TRS80.command`. Double-click the `.command` file in Finder t
 
 ## Level II training corpus
 
-The continued-pretraining set for `Qwen/Qwen3.8-27B` is documented in [basictraining.md](basictraining.md). Build it with `python level2_corpus/build.py`. The training rows are `level2_corpus/out/train.jsonl` and `level2_corpus/out/val.jsonl`.
+The training set for `Qwen/Qwen3.8-27B`, smaller Qwen models, and LoRAs is documented in [basictraining.md](basictraining.md). The rows are `level2_corpus/out/train.jsonl` and `level2_corpus/out/val.jsonl`.
 
 ## License
 

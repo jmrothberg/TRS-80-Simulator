@@ -44,8 +44,10 @@ def _iter_files():
     if not os.path.isdir(RAW):
         return
     for dirpath, dirnames, filenames in os.walk(RAW):
-        # raw/gw is GW-BASIC. It is packed by build_gw(), not this Level II pass.
-        dirnames[:] = [d for d in dirnames if d not in ("__pycache__", "gw")]
+        # These folders are other dialects. They have their own JSONL files.
+        # A Level II rebuild must not pull them in untagged.
+        dirnames[:] = [d for d in dirnames if d not in (
+            "__pycache__", "gw", "mbasic", "cbm", "cbm_prg", "model100")]
         for name in filenames:
             if name in _SKIP_NAMES or name == ".ok":
                 continue
