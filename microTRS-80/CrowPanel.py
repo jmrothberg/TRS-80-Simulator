@@ -165,10 +165,25 @@ class SSD1683(framebuf.FrameBuffer):
 
     def _wait_until_idle(self):
         # Give up if BUSY stays high. An endless wait here froze the > prompt after DIR.
-        for _ in range(800):
+        # while_busy, if set, reads keys during the paint so typing is not frozen.
+        fn = getattr(self, 'while_busy', None)
+        if fn is None:
+            for _ in range(800):
+                if self.busy.value() != 1:
+                    return
+                sleep_ms(10)
+            return
+        # Shorter slices while typing, still about 8 seconds before giving up.
+        for _ in range(2000):
             if self.busy.value() != 1:
                 return
-            sleep_ms(10)
+            fn = getattr(self, 'while_busy', None)
+            if fn is not None:
+                try:
+                    fn()
+                except Exception:
+                    pass
+            sleep_ms(4)
 
 
     def HW_RESET(self):
@@ -385,7 +400,17 @@ class Screen_579(SSD1683):
         # prepare file-like object to work with
         bitmap_buffer = BytesIO(self.buffer)
 
+        row_n = 0
         while True:
+            # The upload is the long blind stretch. Let the keyboard hook drain queued keys.
+            if row_n % 16 == 0:
+                fn = getattr(self, 'while_busy', None)
+                if fn is not None:
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+            row_n += 1
             chunk = bitmap_buffer.read(50)
             if not chunk: break
 
@@ -411,6 +436,56 @@ class Screen_579(SSD1683):
             self.PartUpdate()
         else:
             self.Update()
+
+    def show_rows(self, y0, y1):
+        """Write only scanlines y0..y1, then a partial refresh. Restores the full window."""
+        if y0 < 0:
+            y0 = 0
+        if y1 >= self.EPD_HEIGHT:
+            y1 = self.EPD_HEIGHT - 1
+        if y1 < y0:
+            return
+        stride = self.EPD_WIDTH // 8
+        try:
+            self._set_y_window(y0, y1)
+            buf = self.buffer
+            for y in range(y0, y1 + 1):
+                row = buf[y * stride:(y + 1) * stride]
+                # Same split as show(): 50 bytes to the slave, the overlap byte, then the master.
+                self._cmd(self.SET_WRITE_RAM_SLAVE)
+                self._data_s(row[:50])
+                self._cmd(self.SET_WRITE_RAM)
+                self._data_s(row[49:99])
+            # Fast update from the RAM we just wrote. Partial mode needs the old
+            # image buffer and would flash the rest of the panel.
+            self.FastUpdate()
+        finally:
+            # show() writes the whole buffer and does not set the window itself.
+            self.SetRAMMP()
+            self.SetRAMMA()
+            self.SetRAMSP()
+            self.SetRAMSA()
+
+    def _set_y_window(self, y0, y1):
+        """RAM Y range on both controllers, counters parked at the first row."""
+        y0 &= 0x1FF
+        y1 &= 0x1FF
+        self._cmd(self.SET_RAMYPOS)
+        self._data(y0 & 0xFF)
+        self._data((y0 >> 8) & 0xFF)
+        self._data(y1 & 0xFF)
+        self._data((y1 >> 8) & 0xFF)
+        self._cmd(self.SET_RAMXCOUNT, 0x31)
+        self._cmd(self.SET_RAMYCOUNT, y0 & 0xFF)
+        self._data((y0 >> 8) & 0xFF)
+        self._cmd(self.SET_RAMYPOS_SLAVE)
+        self._data(y0 & 0xFF)
+        self._data((y0 >> 8) & 0xFF)
+        self._data(y1 & 0xFF)
+        self._data((y1 >> 8) & 0xFF)
+        self._cmd(self.SET_RAMXCOUNT_SLAVE, 0x00)
+        self._cmd(self.SET_RAMYCOUNT_SLAVE, y0 & 0xFF)
+        self._data((y0 >> 8) & 0xFF)
 
 
 class Screen_420(SSD1683):

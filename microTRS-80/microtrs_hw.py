@@ -50,31 +50,93 @@ class Hardware:
         top = (height - scale_y * 16) // 2
         fg = cfg.PALETTE[machine.color_fg]
         bg = cfg.PALETTE[machine.color_bg]
-        d.fill(bg)
-        for y in range(48):
-            for x in range(128):
-                bit = y * 128 + x
-                if machine.pixels[bit // 8] & (1 << (bit % 8)):
-                    px = left + x * scale_x // 2
-                    py = top + y * scale_y // 3
-                    color = cfg.PALETTE[machine.pixel_colors.get(bit, machine.color_fg)]
-                    d.fill_rect(px, py, max(1, scale_x // 2), max(1, scale_y // 3), color)
-        for row in range(16):
-            for col in range(64):
-                character = machine.screen[row][col]
-                glyph = FONT.get(character)
-                if glyph:
-                    px, py = left + col * scale_x, top + row * scale_y
-                    ink = cfg.PALETTE[machine.text_colors[row * 64 + col]]
-                    # 5x8 glyph, plus a 1-pixel gap. Grow it to fill the cell
-                    # so the console is readable in the center of a large panel.
-                    gs = max(1, min(scale_x // 6, scale_y // 8))
-                    for gx, bits in enumerate(glyph):
-                        for gy in range(8):
-                            if bits & (1 << gy):
-                                d.fill_rect(px + gx * gs, py + gy * gs, gs, gs, ink)
-        if hasattr(d, 'show'):
-            d.show()
+        # Read keys a few times while the glyphs are drawn. The panel paint is the long part.
+        panel = getattr(d, 'panel', None)
+        hook = getattr(panel, 'while_busy', None) if panel is not None else None
+        # Clock held low makes the panel keyboard store keys until the hook reads them.
+        if hook is not None:
+            ps2_hold(True)
+        try:
+            d.fill(bg)
+            for y in range(48):
+                if hook is not None and y % 8 == 0:
+                    try:
+                        hook()
+                    except Exception:
+                        pass
+                for x in range(128):
+                    bit = y * 128 + x
+                    if machine.pixels[bit // 8] & (1 << (bit % 8)):
+                        px = left + x * scale_x // 2
+                        py = top + y * scale_y // 3
+                        color = cfg.PALETTE[machine.pixel_colors.get(bit, machine.color_fg)]
+                        d.fill_rect(px, py, max(1, scale_x // 2), max(1, scale_y // 3), color)
+            for row in range(16):
+                if hook is not None and row % 4 == 0:
+                    try:
+                        hook()
+                    except Exception:
+                        pass
+                for col in range(64):
+                    character = machine.screen[row][col]
+                    glyph = FONT.get(character)
+                    if glyph:
+                        px, py = left + col * scale_x, top + row * scale_y
+                        ink = cfg.PALETTE[machine.text_colors[row * 64 + col]]
+                        # 5x8 glyph, plus a 1-pixel gap. Grow it to fill the cell
+                        # so the console is readable in the center of a large panel.
+                        gs = max(1, min(scale_x // 6, scale_y // 8))
+                        for gx, bits in enumerate(glyph):
+                            for gy in range(8):
+                                if bits & (1 << gy):
+                                    d.fill_rect(px + gx * gs, py + gy * gs, gs, gs, ink)
+            # Fast update always repaints the whole panel, so the cursor is a solid
+            # block in the next-key cell. A blink would refresh the page every time.
+            cur = machine.cursor
+            if 0 <= cur < 1024:
+                row, col = divmod(cur, 64)
+                px, py = left + col * scale_x, top + row * scale_y
+                # Any non-zero color is black ink on this panel.
+                d.fill_rect(px, py, scale_x, scale_y, 1)
+            if hasattr(d, 'show'):
+                d.show()
+        finally:
+            if hook is not None:
+                ps2_hold(False)
+
+    def draw_cells(self, machine, indexes):
+        """Redraw only the cells that a key just changed, then a partial panel update."""
+        d = self.display
+        if d is None or not hasattr(d, 'show_rows'):
+            return
+        from font5x8 import FONT
+        width, height = cfg.DISPLAY_WIDTH, cfg.DISPLAY_HEIGHT
+        scale_x, scale_y = max(1, width // 64), max(1, height // 16)
+        left = (width - scale_x * 64) // 2
+        top = (height - scale_y * 16) // 2
+        bg = cfg.PALETTE[machine.color_bg]
+        gs = max(1, min(scale_x // 6, scale_y // 8))
+        y0, y1 = height, -1
+        for index in indexes:
+            if index < 0 or index >= 1024:
+                continue
+            row, col = divmod(index, 64)
+            px, py = left + col * scale_x, top + row * scale_y
+            d.fill_rect(px, py, scale_x, scale_y, bg)
+            glyph = FONT.get(machine.screen[row][col])
+            ink = cfg.PALETTE[machine.text_colors[index]]
+            if glyph:
+                for gx, bits in enumerate(glyph):
+                    for gy in range(8):
+                        if bits & (1 << gy):
+                            d.fill_rect(px + gx * gs, py + gy * gs, gs, gs, ink)
+            if py < y0:
+                y0 = py
+            bottom = py + scale_y - 1
+            if bottom > y1:
+                y1 = bottom
+        if y1 >= y0:
+            d.show_rows(y0, y1)
 
 
 # Bare LOAD "STARTREK" tries these, same order as the FPGA card.
@@ -521,3 +583,389 @@ class _FatVol:
         if first >= 2:
             self._free(first)
         return True
+
+
+# PS/2 set 2. The keyboard clocks one short frame per make or break.
+# A Python pin interrupt on the ESP32 drops those edges, so the clock is
+# watched in a tight loop only while BASIC is waiting for a key.
+# ESP32-S3 GPIO_IN is 0x6000403C (pins 0-31). Clock and data must stay in that range.
+_PS2_MAP = {
+    0x1C: 'A', 0x32: 'B', 0x21: 'C', 0x23: 'D', 0x24: 'E', 0x2B: 'F', 0x34: 'G',
+    0x33: 'H', 0x43: 'I', 0x3B: 'J', 0x42: 'K', 0x4B: 'L', 0x3A: 'M', 0x31: 'N',
+    0x44: 'O', 0x4D: 'P', 0x15: 'Q', 0x2D: 'R', 0x1B: 'S', 0x2C: 'T', 0x3C: 'U',
+    0x2A: 'V', 0x1D: 'W', 0x22: 'X', 0x35: 'Y', 0x1A: 'Z',
+    0x45: '0', 0x16: '1', 0x1E: '2', 0x26: '3', 0x25: '4', 0x2E: '5', 0x36: '6',
+    0x3D: '7', 0x3E: '8', 0x46: '9',
+    0x0E: '`', 0x4E: '-', 0x55: '=', 0x5D: '\\', 0x54: '[', 0x5B: ']',
+    0x4C: ';', 0x52: "'", 0x41: ',', 0x49: '.', 0x4A: '/', 0x29: ' ',
+    0x5A: '\n', 0x66: '\x08', 0x76: '\x1b',
+    0x70: '0', 0x69: '1', 0x72: '2', 0x7A: '3', 0x6B: '4', 0x73: '5',
+    0x74: '6', 0x6C: '7', 0x75: '8', 0x7D: '9', 0x71: '.', 0x79: '+', 0x7B: '-', 0x7C: '*',
+}
+_PS2_SHIFT = {
+    0x16: '!', 0x1E: '@', 0x26: '#', 0x25: '$', 0x2E: '%', 0x36: '^', 0x3D: '&',
+    0x3E: '*', 0x46: '(', 0x45: ')', 0x0E: '~', 0x4E: '_', 0x55: '+', 0x5D: '|',
+    0x54: '{', 0x5B: '}', 0x4C: ':', 0x52: '"', 0x41: '<', 0x49: '>', 0x4A: '?',
+}
+_ps2_on = False
+_ps2_frame = None
+_ps2_spin = None
+_ps2_shift = False
+_ps2_ctrl = False
+_ps2_ext = False
+_ps2_brk = False
+_clk_bit = 0
+_dat_bit = 0
+_ps2_clk = None
+_ps2_held = False
+_Pin = None
+_ps2_burst = None
+_ps2_raw = bytearray(16)
+_edge_spins = 1000
+_spins_per_us = 1
+_irq_disable = None
+_irq_restore = None
+
+try:
+    import micropython
+
+    @micropython.viper
+    def _ps2_spin(n: int) -> int:
+        # Same kind of loop as a frame read, so the timeout matches real edges.
+        gpio = ptr32(0x6000403C)
+        acc = 0
+        i = n
+        while i > 0:
+            acc += gpio[0]
+            i -= 1
+        return acc
+
+    @micropython.viper
+    def _ps2_frame(clk_bit: int, dat_bit: int, edge_spins: int, wait_spins: int) -> int:
+        # Start bit, 8 data bits LSB first, odd parity, stop. -1 if the clock stays idle.
+        gpio = ptr32(0x6000403C)
+        clk_mask = 1 << clk_bit
+        dat_mask = 1 << dat_bit
+        spins = wait_spins
+        seen_high = 0
+        while spins > 0:
+            spins -= 1
+            level = gpio[0]
+            if (level & clk_mask) != 0:
+                seen_high = 1
+                continue
+            if seen_high == 0:
+                continue
+            if (level & dat_mask) != 0:
+                # Clock fell, but this is not a start bit.
+                seen_high = 0
+                continue
+            bits = 0
+            mask = 1
+            bit_i = 0
+            while bit_i < 8:
+                hold = edge_spins
+                while hold > 0 and (gpio[0] & clk_mask) == 0:
+                    hold -= 1
+                hold = edge_spins
+                while hold > 0 and (gpio[0] & clk_mask) != 0:
+                    hold -= 1
+                if (gpio[0] & clk_mask) != 0:
+                    return -1
+                if (gpio[0] & dat_mask) != 0:
+                    bits = bits | mask
+                mask = mask << 1
+                bit_i += 1
+            # Parity, then stop.
+            hold = edge_spins
+            while hold > 0 and (gpio[0] & clk_mask) == 0:
+                hold -= 1
+            hold = edge_spins
+            while hold > 0 and (gpio[0] & clk_mask) != 0:
+                hold -= 1
+            if (gpio[0] & clk_mask) != 0:
+                return -1
+            parity = 0
+            if (gpio[0] & dat_mask) != 0:
+                parity = 1
+            hold = edge_spins
+            while hold > 0 and (gpio[0] & clk_mask) == 0:
+                hold -= 1
+            hold = edge_spins
+            while hold > 0 and (gpio[0] & clk_mask) != 0:
+                hold -= 1
+            if (gpio[0] & clk_mask) != 0:
+                return -1
+            if (gpio[0] & dat_mask) == 0:
+                return -1
+            ones = parity
+            scan = bits
+            while scan != 0:
+                ones += scan & 1
+                scan = scan >> 1
+            if (ones & 1) == 0:
+                return -1
+            return bits
+        return -1
+except Exception:
+    _ps2_frame = None
+    _ps2_spin = None
+
+try:
+    @micropython.viper
+    def _ps2_burst(clk_bit: int, dat_bit: int, edge_spins: int, first_spins: int, gap_spins: int, raw) -> int:
+        # One IRQ-off stretch. A queued burst is make, break, make with almost no gap.
+        # The byte loop stays here. A call out would hand back an object and drop the rest.
+        buf = ptr8(raw)
+        gpio = ptr32(0x6000403C)
+        clk_mask = 1 << clk_bit
+        dat_mask = 1 << dat_bit
+        n = 0
+        wait = first_spins
+        while n < 16:
+            spins = wait
+            seen_high = 0
+            got = 0
+            while spins > 0:
+                spins -= 1
+                level = gpio[0]
+                if (level & clk_mask) != 0:
+                    seen_high = 1
+                    continue
+                if seen_high == 0:
+                    continue
+                if (level & dat_mask) != 0:
+                    seen_high = 0
+                    continue
+                bits = 0
+                mask = 1
+                bit_i = 0
+                ok = 1
+                while bit_i < 8:
+                    hold = edge_spins
+                    while hold > 0 and (gpio[0] & clk_mask) == 0:
+                        hold -= 1
+                    hold = edge_spins
+                    while hold > 0 and (gpio[0] & clk_mask) != 0:
+                        hold -= 1
+                    if (gpio[0] & clk_mask) != 0:
+                        ok = 0
+                        break
+                    if (gpio[0] & dat_mask) != 0:
+                        bits = bits | mask
+                    mask = mask << 1
+                    bit_i += 1
+                if ok == 0:
+                    return n
+                hold = edge_spins
+                while hold > 0 and (gpio[0] & clk_mask) == 0:
+                    hold -= 1
+                hold = edge_spins
+                while hold > 0 and (gpio[0] & clk_mask) != 0:
+                    hold -= 1
+                if (gpio[0] & clk_mask) != 0:
+                    return n
+                parity = 0
+                if (gpio[0] & dat_mask) != 0:
+                    parity = 1
+                hold = edge_spins
+                while hold > 0 and (gpio[0] & clk_mask) == 0:
+                    hold -= 1
+                hold = edge_spins
+                while hold > 0 and (gpio[0] & clk_mask) != 0:
+                    hold -= 1
+                if (gpio[0] & clk_mask) != 0:
+                    return n
+                if (gpio[0] & dat_mask) == 0:
+                    return n
+                ones = parity
+                scan = bits
+                while scan != 0:
+                    ones += scan & 1
+                    scan = scan >> 1
+                if (ones & 1) == 0:
+                    return n
+                buf[n] = bits
+                n += 1
+                got = 1
+                break
+            if got == 0:
+                return n
+            wait = gap_spins
+        return n
+except Exception:
+    _ps2_burst = None
+
+
+def _ps2_decode(code):
+    """One set-2 scan byte becomes a character, or '' for a shift or a break."""
+    global _ps2_shift, _ps2_ctrl, _ps2_ext, _ps2_brk
+    if code == 0xE0:
+        _ps2_ext = True
+        return ''
+    if code == 0xF0:
+        _ps2_brk = True
+        return ''
+    ext = _ps2_ext
+    brk = _ps2_brk
+    _ps2_ext = False
+    _ps2_brk = False
+    # Left and right shift, and either Ctrl. A release must not type a character.
+    if code == 0x12 or code == 0x59:
+        _ps2_shift = not brk
+        return ''
+    if code == 0x14:
+        _ps2_ctrl = not brk
+        return ''
+    if brk:
+        return ''
+    if ext:
+        # Arrows match the window: 17 left, 18 right, 19 up, 20 down.
+        if code == 0x5A:
+            return '\n'
+        if code == 0x6B:
+            return '\x11'
+        if code == 0x74:
+            return '\x12'
+        if code == 0x75:
+            return '\x13'
+        if code == 0x72:
+            return '\x14'
+        return ''
+    if _ps2_shift and code in _PS2_SHIFT:
+        ch = _PS2_SHIFT[code]
+    else:
+        ch = _PS2_MAP.get(code, '')
+    if _ps2_ctrl and len(ch) == 1 and 'A' <= ch <= 'Z':
+        return chr(ord(ch) - 64)
+    return ch
+
+
+def ps2_start():
+    """Arm IO15/IO16. Safe to call when the keyboard is not plugged in."""
+    global _ps2_on, _clk_bit, _dat_bit, _edge_spins, _spins_per_us
+    global _irq_disable, _irq_restore, _ps2_clk, _ps2_held, _Pin
+    if _ps2_on or _ps2_frame is None:
+        return
+    clk_pin = getattr(cfg, 'PS2_CLOCK_PIN', None)
+    dat_pin = getattr(cfg, 'PS2_DATA_PIN', None)
+    if clk_pin is None or dat_pin is None:
+        return
+    if clk_pin > 31 or dat_pin > 31:
+        return
+    try:
+        from machine import Pin
+        import machine
+    except ImportError:
+        return
+    _Pin = Pin
+    _ps2_clk = Pin(clk_pin, Pin.IN, Pin.PULL_UP)
+    _ps2_held = False
+    Pin(dat_pin, Pin.IN, Pin.PULL_UP)
+    _clk_bit = clk_pin
+    _dat_bit = dat_pin
+    _irq_disable = machine.disable_irq
+    _irq_restore = machine.enable_irq
+    state = _irq_disable()
+    try:
+        t0 = time.ticks_us()
+        _ps2_spin(20000)
+        dt = time.ticks_diff(time.ticks_us(), t0)
+    finally:
+        _irq_restore(state)
+    if dt < 1:
+        dt = 1
+    _spins_per_us = 20000 // dt
+    if _spins_per_us < 1:
+        _spins_per_us = 1
+    # A wild count would keep interrupts off long enough for the watchdog to reset the chip.
+    if _spins_per_us > 40:
+        _spins_per_us = 40
+    # One edge is about 50 us. 400 us still finishes the frame if the count is a bit short.
+    _edge_spins = _spins_per_us * 400
+    _ps2_on = True
+
+
+def ps2_hold(hold):
+    """Hold the clock low so the keyboard queues keys, or let it send again."""
+    global _ps2_held
+    if not _ps2_on or _ps2_clk is None:
+        return
+    if hold:
+        if _ps2_held:
+            return
+        # The keyboard stops sending and keeps the keys until the clock is released.
+        _ps2_clk.init(_Pin.OUT)
+        _ps2_clk.value(0)
+        _ps2_held = True
+        return
+    if not _ps2_held:
+        return
+    _ps2_clk.init(_Pin.IN, _Pin.PULL_UP)
+    _ps2_held = False
+    time.sleep_us(100)
+
+
+def ps2_char(wait_us=0):
+    """One typed character, or '' if the clock was idle for wait_us."""
+    if not _ps2_on:
+        return ''
+    tries = 0
+    while tries < 4:
+        tries += 1
+        budget = wait_us if tries == 1 else 1500
+        if budget <= 0:
+            return ''
+        if budget > 4000:
+            budget = 4000
+        state = _irq_disable()
+        try:
+            scan = _ps2_frame(_clk_bit, _dat_bit, _edge_spins, budget * _spins_per_us)
+        finally:
+            _irq_restore(state)
+        if scan < 0:
+            return ''
+        ch = _ps2_decode(scan)
+        if ch:
+            return ch
+    return ''
+
+
+def ps2_poll(wait_us=1500):
+    """Every character in one clock burst. Break codes stay paired with their key."""
+    if not _ps2_on:
+        return []
+    if _ps2_burst is None:
+        ch = ps2_char(wait_us)
+        if ch:
+            return [ch]
+        return []
+    if wait_us <= 0:
+        return []
+    if wait_us > 4000:
+        wait_us = 4000
+    gap = _spins_per_us * 800
+    if gap < 1:
+        gap = 1
+    state = _irq_disable()
+    try:
+        n = _ps2_burst(_clk_bit, _dat_bit, _edge_spins, wait_us * _spins_per_us, gap, _ps2_raw)
+    except Exception:
+        n = -1
+    finally:
+        _irq_restore(state)
+    if n < 0:
+        ch = ps2_char(wait_us)
+        if ch:
+            return [ch]
+        return []
+    if n > 16:
+        n = 16
+    found = []
+    i = 0
+    while i < n:
+        ch = _ps2_decode(_ps2_raw[i])
+        if ch:
+            found.append(ch)
+        i += 1
+    return found

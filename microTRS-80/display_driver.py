@@ -26,6 +26,10 @@ class EInk:
         # mode 1 is the fast full-panel update.
         self.panel.show(1)
 
+    def show_rows(self, y0, y1):
+        # One text row while typing. A full-panel refresh here is what made keys late.
+        self.panel.show_rows(y0, y1)
+
 
 def create_display():
     return EInk()

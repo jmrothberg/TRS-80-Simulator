@@ -1,18 +1,33 @@
 # microTRS-80 for ESP32
 
-The interpreter runs on the CrowPanel. The green window is only the keyboard and a copy of the 64×16 panel. Close that window before a reset or a file copy. It owns `/dev/ttyUSB0`.
+The interpreter runs on the CrowPanel. The window on the computer is only a keyboard and a copy of the 64×16 panel. Close that window before a reset or a file copy. It owns `/dev/ttyUSB0`.
 
-## Just the window
+Use `/usr/bin/python3`, not the `python3` inside the project `.venv`. If a command says permission denied, that terminal is not in group `dialout`. A normal desktop terminal is. Cursor's terminal is not.
 
-BASIC is already on the board. This only opens the keyboard. Use `/usr/bin/python3`, not the `python3` inside the project `.venv`.
+## Stored in flash
+
+The BASIC interpreter is the Python files on the ESP32 flash chip. Copying them once writes them into that flash. Unplugging power leaves them there. The next time the panel gets power, MicroPython starts and runs `main.py` by itself. Wait for the e-ink refresh. The panel then shows:
+
+```text
+TRS-80 BASIC
+Type HELP.
+READY
+>
+```
+
+`READY` is its own line, and only at startup and when a program breaks. The next line is `>`.
+
+The window on the computer is not stored on the board. Open it again when you want that copy of the screen. A BASIC program you typed is in RAM until you `SAVE` it to the microSD card. The SD card keeps its files across power loss too. `SAVE` is what keeps a program. The flash copy is what keeps the interpreter.
+
+## Open the window
+
+BASIC is already on the board. This only opens the keyboard and the screen copy.
 
 ```sh
 /usr/bin/python3 /home/jonathan/TRS-80-Simulator/microTRS-80/console_gui.py
 ```
 
-If the window says permission denied, that terminal is not in group `dialout`. Cursor's terminal is not. Run the same command in a desktop terminal.
-
-Esc stops a running program. At `READY>`:
+Esc stops a running program. At the `>` prompt:
 
 ```basic
 LOAD "STARTREK"
@@ -24,18 +39,39 @@ LOAD "ADVENT"
 RUN
 ```
 
-## Restart fresh
+## Set up a new board
 
-Same files, board reboots to `READY>`, then the window opens. Close the old window first.
+CrowPanel 5.79 (ESP32-S3, 8 MB flash, 8 MB octal PSRAM). Close any window that has `/dev/ttyUSB0` first.
+
+1. Flash MicroPython for `ESP32_GENERIC_S3` with **octal** PSRAM (`SPIRAM_OCT`). The plain S3 image and the quad-PSRAM image will not match this module. Erase is only for a board that does not already have this BASIC. It wipes the flash filesystem.
+
+```sh
+cd /home/jonathan/TRS-80-Simulator/microTRS-80
+esptool.py --chip esp32s3 --port /dev/ttyUSB0 erase_flash
+esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 460800 write_flash -z 0 ESP32_GENERIC_S3-SPIRAM_OCT.bin
+```
+
+2. A new MicroPython flash has no `main.py`, so the board sits at the `>>>` prompt and the copy can go straight on. One file per command. These six files are the interpreter.
+
+```sh
+~/.local/bin/mpremote connect /dev/ttyUSB0 cp main.py :main.py
+~/.local/bin/mpremote connect /dev/ttyUSB0 cp board_config.py :board_config.py
+~/.local/bin/mpremote connect /dev/ttyUSB0 cp microtrs_hw.py :microtrs_hw.py
+~/.local/bin/mpremote connect /dev/ttyUSB0 cp font5x8.py :font5x8.py
+~/.local/bin/mpremote connect /dev/ttyUSB0 cp display_driver.py :display_driver.py
+~/.local/bin/mpremote connect /dev/ttyUSB0 cp CrowPanel.py :CrowPanel.py
+```
+
+3. Reset. `main.py` runs from flash and stays there after every power cycle.
 
 ```sh
 /usr/bin/python3 -c 'import serial,time; s=serial.Serial("/dev/ttyUSB0",115200); s.dtr=False; s.rts=True; time.sleep(0.05); s.rts=False; time.sleep(0.3); s.close()'
 /usr/bin/python3 /home/jonathan/TRS-80-Simulator/microTRS-80/console_gui.py
 ```
 
-## Load BASIC onto the board
+## Update the Python on a board that already runs BASIC
 
-New board, or the Python on the computer changed. Close the window first. The reset-and-Ctrl-C drops MicroPython to `>>>` while the display is still starting, which is the only time Ctrl-C is not caught by BASIC. Copy one file per command. The last reset lets `main.py` run.
+Close the window first. BASIC catches Ctrl-C once it is at the prompt, so the reset below sends Ctrl-C while the display is still starting. That is the moment MicroPython will stop at `>>>`. Copy one file per command. The last reset lets `main.py` run again from flash.
 
 ```sh
 cd /home/jonathan/TRS-80-Simulator/microTRS-80
@@ -53,11 +89,88 @@ s.close()'
 /usr/bin/python3 /home/jonathan/TRS-80-Simulator/microTRS-80/console_gui.py
 ```
 
-If open says permission denied, that terminal is not in group `dialout`. A normal login terminal is. Log out and back in once if a new terminal still is not.
+## Restart
+
+Same flash contents. The board boots to `READY` and `>`, then the window opens. Close the old window first.
+
+```sh
+/usr/bin/python3 -c 'import serial,time; s=serial.Serial("/dev/ttyUSB0",115200); s.dtr=False; s.rts=True; time.sleep(0.05); s.rts=False; time.sleep(0.3); s.close()'
+/usr/bin/python3 /home/jonathan/TRS-80-Simulator/microTRS-80/console_gui.py
+```
+
+## PS/2 keyboard
+
+A keyboard on the GPIO header types into BASIC the same way the window does. Clock is IO15 (`PS2_CLOCK_PIN`) and data is IO16 (`PS2_DATA_PIN`) in `board_config.py`. Letters are capitals. Esc or Ctrl-C stops a running program. Wire the keyboard, then reset the panel so `main.py` sees it from power-up.
+
+Power comes from the header **3.3 V** pin, and ground from GND. The ESP32 pins are 3.3 V pins. The keyboard pulls clock and data up to whatever voltage is on its power pin, so that power pin has to be 3.3 V. Leave the second port empty (mouse data and mouse clock).
+
+Each plug below is the same four signals. A keyboard that only speaks USB stays silent on this wiring. A round PS/2 keyboard works. So does an older USB keyboard that types through a passive purple PS/2 adapter, because that adapter is just these four wires.
+
+### Labeled PS/2 breakout (D1, C1, GND, VB)
+
+```text
+  breakout                         CrowPanel header
+  --------                         ----------------
+  C1   clock  -------------------> IO15
+  D1   data   -------------------> IO16
+  GND         -------------------> GND
+  VB   power  -------------------> 3.3 V
+
+  D2 and C2 are the mouse port. Leave them empty.
+```
+
+### USB breakout
+
+Female USB-A, the four pins a passive PS/2 adapter uses. D+ is clock and D− is data.
+
+```text
+  USB breakout                     CrowPanel header
+  ------------                     ----------------
+  D+   (often green)  -----------> IO15   clock
+  D-   (often white)  -----------> IO16   data
+  GND  (often black)  -----------> GND
+  VCC  (often red)    -----------> 3.3 V
+
+  Looking into the USB-A socket, tongue down, left to right:
+
+      1 VCC    2 D-    3 D+    4 GND
+      (3.3 V)  (IO16)  (IO15)  (GND)
+```
+
+### Round PS/2 plug (6-pin mini-DIN)
+
+Pin 1 is data, pin 5 is clock, pin 4 is power, pin 3 is ground. Pins 2 and 6 are the mouse wires on a combo plug. Leave them empty.
+
+```text
+  round plug                       CrowPanel header
+  ----------                       ----------------
+  pin 5  clock  -----------------> IO15
+  pin 1  data   -----------------> IO16
+  pin 3  GND    -----------------> GND
+  pin 4  VCC    -----------------> 3.3 V
+  pin 2          (empty)
+  pin 6          (empty)
+```
+
+The keyboard cable's plug is the male, pins facing you. A round socket on a breakout is the female, looking into the holes. The two faces are mirror images. Follow the pin numbers.
+
+```text
+  male plug, pins toward you          female socket, looking into the holes
+
+        6       5                           5       6
+
+     4             3                     3             4
+
+        2       1                           1       2
+
+     pin 1 data -> IO16                 pin 1 data -> IO16
+     pin 5 clock -> IO15                pin 5 clock -> IO15
+     pin 3 GND, pin 4 3.3 V             pin 3 GND, pin 4 3.3 V
+```
 
 This edition runs the BASIC interpreter **on the ESP32**, using MicroPython.
 It has a 64×16 character screen buffer and a separate 128×48 graphics buffer.
-It accepts keyboard input over USB serial and can render to an attached LCD
+It accepts keyboard input over USB serial and from a PS/2 keyboard on the GPIO header, and can render to an attached LCD
 through the board-specific display driver interface. Programs and tape data
 are read and written on a microSD card.
 
@@ -77,19 +190,9 @@ initialization code and bus driver; the board model is needed to supply it.
 
 ## Installation
 
-1. Flash MicroPython for your board. Connect a USB serial terminal.
-2. Copy `main.py`, `board_config.py`, `microtrs_hw.py`, and `font5x8.py` to the
-   board's root filesystem. For the CrowPanel 5.79 also copy `display_driver.py`
-   and `CrowPanel.py`. From this folder:
+For this CrowPanel, follow **Set up a new board** above. That flash of MicroPython plus the six `mpremote` copies is the whole install. The files stay in flash after power is removed.
 
-   ```sh
-   mpremote connect auto fs cp main.py board_config.py microtrs_hw.py font5x8.py display_driver.py CrowPanel.py :
-   ```
-
-3. Fill in `board_config.py` for your SD pins and optional audio pin; add
-   `display_driver.py` for your LCD and copy it to the board.
-4. Reset the ESP32, or use **Restart fresh** above. At `READY>`, enter numbered BASIC lines or commands.
-   Esc in the window interrupts execution.
+On a different ESP32, fill in `board_config.py` for the SD pins and the optional speaker pin, and supply a `display_driver.py` whose `create_display()` returns a driver with `fill` and `fill_rect`. Copy those files the same way, then reset. At the `>` prompt, enter numbered BASIC lines or commands. Esc in the window interrupts execution.
 
 The window shows the same 64×16 the panel last drew, not the serial monitor. The panel updates when a program waits for input, clears the screen, or stops. Esc in that window breaks a running program.
 

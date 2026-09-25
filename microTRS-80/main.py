@@ -336,10 +336,14 @@ class Basic:
         for _ in range(4):
             if self.keys:
                 key = self.keys.pop(0)
-            elif self.poller is not None and self.poller.poll(0):
-                key = sys.stdin.read(1)
             else:
-                return ''
+                # Short watch. A long one here would slow every BASIC statement.
+                key = keyboard_char(200)
+                if not key:
+                    if self.poller is not None and self.poller.poll(0):
+                        key = sys.stdin.read(1)
+                    else:
+                        return ''
             if key == '\x1c':
                 self.resend()
                 continue
@@ -389,8 +393,9 @@ class Basic:
         if self.dirty and self.hardware is not None:
             # Update the host window before the slow panel refresh, from the same buffer.
             self.mirror()
-            self.hardware.draw(self)
+            # Keys typed during the paint set dirty again. Leave that set.
             self.dirty = False
+            self.hardware.draw(self)
 
     def mirror(self):
         """Frame the panel just drew: ESC ] S, cursor, then 1024 cells as hex."""
@@ -425,14 +430,36 @@ class Basic:
         self.flush_out()
 
     def resend(self):
-        """Repeat the last panel frame. Does not redraw the e-ink."""
-        if not self.last_frame:
-            return
+        """Repeat the picture that is on the screen now. Does not redraw the e-ink."""
+        # Rebuild it. A saved frame would wipe keys that were echoed one cell at a time.
         try:
-            self._write_out(self.last_frame)
+            self.mirror()
         except Exception:
             # A frame request must not become ?ERROR at the prompt.
             return
+
+    def poke(self, index):
+        """Tell the window one cell changed. A full frame per key is what made typing late."""
+        if index < 0 or index >= 1024:
+            return
+        ch = self.screen[index // 64][index % 64]
+        code = ord(ch) if ch else 32
+        if code > 255 or code < 0:
+            code = 32
+        cur = self.cursor
+        if cur < 0:
+            cur = 0
+        if cur > 1023:
+            cur = 1023
+        # ESC ] k, where the next key goes, which cell, that cell's byte.
+        self._write_out('\x1b]k%04d%04d%02X' % (cur, index, code))
+
+    def echo_cell(self, index):
+        """Tell the window one cell changed. The e-ink updates on the next full refresh."""
+        try:
+            self.poke(index)
+        except Exception:
+            pass
 
     def flush_out(self):
         flush = getattr(sys.stdout, 'flush', None)
@@ -1172,64 +1199,176 @@ def show_prompt(basic, ready=False):
     basic.refresh()
 
 
+# MicroPython functions cannot hold attributes, so the loader is a module global.
+_keyboard_fn = None
+
+
+def keyboard_char(wait_us):
+    """One PS/2 character, or '' . USB is unchanged when no keyboard code is loaded."""
+    global _keyboard_fn
+    if _keyboard_fn is None:
+        try:
+            from microtrs_hw import ps2_char
+            _keyboard_fn = ps2_char
+        except ImportError:
+            def _keyboard_fn(wait_us=0):
+                return ''
+    return _keyboard_fn(wait_us)
+
+
+def _serial_char(basic):
+    """One USB character already waiting, or '' . Does not block."""
+    if basic.poller is None:
+        return ''
+    try:
+        if not basic.poller.poll(0):
+            return ''
+    except Exception:
+        pass
+    # 0xFF from a replugged CH340 is not UTF-8. Text read() raises, and
+    # str() of that error is empty, so the prompt printed a bare ?ERROR.
+    try:
+        ch = sys.stdin.read(1)
+    except (EOFError, OSError, UnicodeError, MemoryError, TypeError):
+        return ''
+    if isinstance(ch, (bytes, bytearray)):
+        if len(ch) != 1:
+            return ''
+        ch = chr(ch[0])
+    # A broken UTF-8 byte can come back glued to the next keys as one string.
+    # ord() of that raises, and the prompt turned it into a blank ?ERROR.
+    if not ch or len(ch) != 1:
+        return ''
+    return ch
+
+
+def _read_char(basic):
+    """One character from USB or the PS/2 keyboard. '' if neither is ready."""
+    # The window key is already in the UART. Do not wait on the PS/2 clock first.
+    ch = _serial_char(basic)
+    if ch:
+        return ch
+    return keyboard_char(1500) or ''
+
+
 def read_line(basic, prompt=''):
-    """Read one console line. Echo goes to USB serial and the 64x16 screen."""
+    """Read one console line. The window updates per key. The panel paints in batches."""
     if prompt:
         basic.emit(prompt)
         basic.refresh()
     line = []
-    while True:
-        # 0xFF from a replugged CH340 is not UTF-8. Text read() raises, and
-        # str() of that error is empty, so the prompt printed a bare ?ERROR.
-        try:
-            ch = sys.stdin.read(1)
-        except (EOFError, OSError, UnicodeError, MemoryError, TypeError):
-            time.sleep(0.02)
-            continue
-        if isinstance(ch, (bytes, bytearray)):
-            if len(ch) != 1:
-                continue
-            ch = chr(ch[0])
-        # A broken UTF-8 byte can come back glued to the next keys as one string.
-        # ord() of that raises, and the prompt turned it into a blank ?ERROR.
-        if not ch or len(ch) != 1:
-            continue
+    done = False
+    last_edit = 0
+    # After a paint, keys that arrived during it should go out on the next paint.
+    catch_up = False
+
+    def apply_key(ch):
+        nonlocal done, last_edit
         if ch in '\r\n':
             basic.emit('\n')
-            return ''.join(line)
+            done = True
+            return
         if ch in '\x08\x7f':
             if line:
                 line.pop()
                 basic.emit('\x08 \x08')
-                # Move the window caret back. Does not redraw the e-ink.
-                try:
-                    basic.mirror()
-                except Exception:
-                    pass
-            continue
+                basic.echo_cell(basic.cursor)
+                last_edit = time.ticks_ms()
+            return
         if ch == '\x1b':
             # Esc breaks a running program. At READY it does nothing.
             if basic.running:
                 raise KeyboardInterrupt
-            continue
+            return
         if ch == '\x1c':
             # The window asked for the picture that is already on the panel.
             basic.resend()
-            continue
+            return
         if ch == '\x03':
             raise KeyboardInterrupt
         if ord(ch) < 32:
-            continue
+            return
         # The console is uppercase only. A typed "dir" is shown and stored as DIR.
         if 'a' <= ch <= 'z':
             ch = ch.upper()
         line.append(ch)
         basic.emit(ch)
-        # Keep the window caret on this line, right after the character just typed.
-        try:
-            basic.mirror()
-        except Exception:
-            pass
+        basic.echo_cell(basic.cursor - 1)
+        last_edit = time.ticks_ms()
+
+    try:
+        from microtrs_hw import ps2_hold, ps2_poll
+    except ImportError:
+        ps2_hold = None
+
+        def ps2_poll(wait_us=0):
+            return []
+
+    def take_panel_keys(wait_us):
+        # Let the keyboard send, grab the whole burst, then hold the clock while we echo.
+        if ps2_hold is not None:
+            ps2_hold(False)
+        keys = ps2_poll(wait_us)
+        if not done and ps2_hold is not None:
+            ps2_hold(True)
+        for ch in keys:
+            apply_key(ch)
+            if done:
+                break
+
+    def pump():
+        # Called while the panel is busy. Take every key already waiting.
+        while not done:
+            ch = _serial_char(basic)
+            if not ch:
+                break
+            apply_key(ch)
+        if not done:
+            take_panel_keys(2500)
+
+    panel = None
+    hw = basic.hardware
+    disp = getattr(hw, 'display', None) if hw is not None else None
+    if disp is not None:
+        panel = getattr(disp, 'panel', None)
+
+    try:
+        while not done:
+            # Hold the panel keyboard while the window keys are echoed, so its burst stays queued.
+            if ps2_hold is not None:
+                ps2_hold(True)
+            while not done:
+                ch = _serial_char(basic)
+                if not ch:
+                    break
+                apply_key(ch)
+            if done:
+                break
+            take_panel_keys(1500)
+            if done:
+                break
+            if not basic.dirty or basic.hardware is None:
+                continue
+            # A burst of keys is one paint. A key that arrives during the paint
+            # is held and goes out on the next paint, not as its own refresh.
+            now = time.ticks_ms()
+            if not catch_up and time.ticks_diff(now, last_edit) < 100:
+                continue
+            catch_up = False
+            if panel is not None:
+                panel.while_busy = pump
+            try:
+                basic.refresh()
+            finally:
+                if panel is not None:
+                    panel.while_busy = None
+            if basic.dirty:
+                catch_up = True
+    finally:
+        # Leave the clock free when the line is finished, including after Esc.
+        if ps2_hold is not None:
+            ps2_hold(False)
+    return ''.join(line)
 
 
 def main():
@@ -1240,6 +1379,11 @@ def main():
         print('Hardware unavailable:', exc)
         hardware = None
     basic = Basic(hardware=hardware)
+    try:
+        from microtrs_hw import ps2_start
+        ps2_start()
+    except Exception:
+        pass
     basic.input_fn = lambda prompt='': read_line(basic, prompt)
     basic.emit('TRS-80 BASIC\nType HELP.\n')
     basic.need_ready = False

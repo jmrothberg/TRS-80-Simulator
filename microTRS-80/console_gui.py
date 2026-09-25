@@ -27,6 +27,7 @@ class Console(tk.Tk):
         self.pending = b''
         self.snap = b''
         self.snap_left = 0
+        self.snap_kind = ''
         self.serial = None
         self.inbox = queue.Queue()
         # Last text actually put in the widget. A repeat frame must not redraw.
@@ -39,7 +40,10 @@ class Console(tk.Tk):
             bg='white', fg='black', insertbackground='black',
             selectbackground='white', selectforeground='black',
             font=('DejaVu Sans Mono', 15), borderwidth=8, relief='flat',
-            highlightthickness=0)
+            highlightthickness=0, insertwidth=0)
+        # The I-beam sat above and left of ">". A block in the cursor cell is the caret.
+        self.text.tag_configure('caret', background='black', foreground='white')
+        self.caret_on = True
         self.text.pack()
         self.status = tk.Label(
             self, text='Connecting to ' + PORT + ' ...',
@@ -54,6 +58,7 @@ class Console(tk.Tk):
         self.text.focus_set()
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.after(40, self.drain)
+        self.after(500, self.blink_caret)
         self.after(2000, self.ask_frame)
         threading.Thread(target=self.reader, daemon=True).start()
 
@@ -114,12 +119,34 @@ class Console(tk.Tk):
         return 'break'
 
     def place_cursor(self):
+        """Block in the cell where the next key will go, on the same line as >."""
+        self.caret_on = True
+        self.text.tag_configure('caret', background='black', foreground='white')
+        self.text.tag_remove('caret', '1.0', 'end')
         row, col = divmod(self.cursor, COLS)
         if row >= ROWS:
             row = ROWS - 1
-            col = COLS
-        self.text.mark_set('insert', '%d.%d' % (row + 1, col))
-        self.text.see('insert')
+        if col >= COLS:
+            col = COLS - 1
+        if col < 0:
+            col = 0
+        start = '%d.%d' % (row + 1, col)
+        end = '%d.%d' % (row + 1, col + 1)
+        try:
+            self.text.tag_add('caret', start, end)
+            self.text.mark_set('insert', start)
+            self.text.see(start)
+        except tk.TclError:
+            return
+        self.painted_cursor = self.cursor
+
+    def blink_caret(self):
+        self.caret_on = not self.caret_on
+        if self.caret_on:
+            self.text.tag_configure('caret', background='black', foreground='white')
+        else:
+            self.text.tag_configure('caret', background='white', foreground='black')
+        self.after(500, self.blink_caret)
 
     def write_char(self, char):
         # Same cursor rules as Basic.screen_write on the board.
@@ -173,6 +200,31 @@ class Console(tk.Tk):
             self.cells.append(line)
         return True
 
+    def apply_poke(self, raw):
+        """One typed cell: 4 cursor digits, 4 cell digits, 2 hex digits."""
+        try:
+            cur = int(raw[0:4])
+            idx = int(raw[4:8])
+            code = int(raw[8:10], 16)
+        except (ValueError, IndexError):
+            return False
+        if not (0 <= idx < COLS * ROWS):
+            return False
+        ch = chr(code) if code >= 32 else ' '
+        row, col = divmod(idx, COLS)
+        self.cells[row][col] = ch
+        self.cursor = cur if 0 <= cur < COLS * ROWS else 0
+        if self.painted is None:
+            return True
+        pos = '%d.%d' % (row + 1, col)
+        nxt = '%d.%d' % (row + 1, col + 1)
+        self.text.delete(pos, nxt)
+        self.text.insert(pos, ch)
+        self.painted = '\n'.join(''.join(line) for line in self.cells)
+        self.painted_cursor = -1
+        self.place_cursor()
+        return False
+
     def feed(self, data):
         """Take panel frames out of the byte stream. Other serial text is the monitor, not the screen."""
         if isinstance(data, str):
@@ -187,18 +239,36 @@ class Console(tk.Tk):
                 self.snap_left -= take
                 if self.snap_left:
                     break
-                applied = self.apply_frame(self.snap) or applied
+                if self.snap_kind == 'k':
+                    applied = self.apply_poke(self.snap) or applied
+                else:
+                    applied = self.apply_frame(self.snap) or applied
                 self.snap = b''
+                self.snap_kind = ''
                 continue
-            mark = self.pending.find(b'\x1b]S')
+            mark, kind = self._marker()
             if mark < 0:
                 if len(self.pending) > 3:
                     self.pending = self.pending[-3:]
                 break
             self.pending = self.pending[mark + 3:]
             self.snap = b''
-            self.snap_left = 4 + COLS * ROWS * 2
+            self.snap_kind = kind
+            if kind == 'k':
+                self.snap_left = 10
+            else:
+                self.snap_left = 4 + COLS * ROWS * 2
         return applied
+
+    def _marker(self):
+        """Earliest frame or one-cell echo in the buffer."""
+        frame = self.pending.find(b'\x1b]S')
+        poke = self.pending.find(b'\x1b]k')
+        if frame < 0:
+            return poke, 'k'
+        if poke < 0 or frame <= poke:
+            return frame, 'S'
+        return poke, 'k'
 
     def paint(self):
         blob = '\n'.join(''.join(row) for row in self.cells)
