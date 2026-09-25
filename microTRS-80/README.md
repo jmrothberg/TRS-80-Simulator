@@ -1,5 +1,60 @@
 # microTRS-80 for ESP32
 
+The interpreter runs on the CrowPanel. The green window is only the keyboard and a copy of the 64×16 panel. Close that window before a reset or a file copy. It owns `/dev/ttyUSB0`.
+
+## Just the window
+
+BASIC is already on the board. This only opens the keyboard. Use `/usr/bin/python3`, not the `python3` inside the project `.venv`.
+
+```sh
+/usr/bin/python3 /home/jonathan/TRS-80-Simulator/microTRS-80/console_gui.py
+```
+
+If the window says permission denied, that terminal is not in group `dialout`. Cursor's terminal is not. Run the same command in a desktop terminal.
+
+Esc stops a running program. At `READY>`:
+
+```basic
+LOAD "STARTREK"
+RUN
+```
+
+```basic
+LOAD "ADVENT"
+RUN
+```
+
+## Restart fresh
+
+Same files, board reboots to `READY>`, then the window opens. Close the old window first.
+
+```sh
+/usr/bin/python3 -c 'import serial,time; s=serial.Serial("/dev/ttyUSB0",115200); s.dtr=False; s.rts=True; time.sleep(0.05); s.rts=False; time.sleep(0.3); s.close()'
+/usr/bin/python3 /home/jonathan/TRS-80-Simulator/microTRS-80/console_gui.py
+```
+
+## Load BASIC onto the board
+
+New board, or the Python on the computer changed. Close the window first. The reset-and-Ctrl-C drops MicroPython to `>>>` while the display is still starting, which is the only time Ctrl-C is not caught by BASIC. Copy one file per command. The last reset lets `main.py` run.
+
+```sh
+cd /home/jonathan/TRS-80-Simulator/microTRS-80
+/usr/bin/python3 -c 'import serial,time; s=serial.Serial("/dev/ttyUSB0",115200,timeout=0.05); s.dtr=False; s.rts=True; time.sleep(0.05); s.rts=False; end=time.time()+2.5
+while time.time()<end:
+ s.write(b"\x03"); time.sleep(0.05)
+s.close()'
+~/.local/bin/mpremote connect /dev/ttyUSB0 resume cp main.py :main.py
+~/.local/bin/mpremote connect /dev/ttyUSB0 resume cp board_config.py :board_config.py
+~/.local/bin/mpremote connect /dev/ttyUSB0 resume cp microtrs_hw.py :microtrs_hw.py
+~/.local/bin/mpremote connect /dev/ttyUSB0 resume cp font5x8.py :font5x8.py
+~/.local/bin/mpremote connect /dev/ttyUSB0 resume cp display_driver.py :display_driver.py
+~/.local/bin/mpremote connect /dev/ttyUSB0 resume cp CrowPanel.py :CrowPanel.py
+/usr/bin/python3 -c 'import serial,time; s=serial.Serial("/dev/ttyUSB0",115200); s.dtr=False; s.rts=True; time.sleep(0.05); s.rts=False; time.sleep(0.3); s.close()'
+/usr/bin/python3 /home/jonathan/TRS-80-Simulator/microTRS-80/console_gui.py
+```
+
+If open says permission denied, that terminal is not in group `dialout`. A normal login terminal is. Log out and back in once if a new terminal still is not.
+
 This edition runs the BASIC interpreter **on the ESP32**, using MicroPython.
 It has a 64×16 character screen buffer and a separate 128×48 graphics buffer.
 It accepts keyboard input over USB serial and can render to an attached LCD
@@ -33,19 +88,10 @@ initialization code and bus driver; the board model is needed to supply it.
 
 3. Fill in `board_config.py` for your SD pins and optional audio pin; add
    `display_driver.py` for your LCD and copy it to the board.
-4. Reset the ESP32. At `READY>`, enter numbered BASIC lines or commands.
-   `Ctrl-C` interrupts execution.
+4. Reset the ESP32, or use **Restart fresh** above. At `READY>`, enter numbered BASIC lines or commands.
+   Esc in the window interrupts execution.
 
-On the computer, the 64×16 window uses this keyboard and shows the same
-characters the panel draws in the center:
-
-```sh
-python3 microTRS-80/console_gui.py
-```
-
-The e-ink refresh is slow. The window updates as characters arrive. The
-panel catches up when the board finishes drawing that screen. Esc in that
-window breaks a running program.
+The window shows the same 64×16 the panel last drew, not the serial monitor. The panel updates when a program waits for input, clears the screen, or stops. Esc in that window breaks a running program.
 
 The CrowPanel microSD uses the same FAT32 cards as the FPGA. `LOAD "STARTREK"`
 reads `STARTREK.BAS` (then `.DAT`, `.JMR`, `.TXT`). `SAVE "FOO"` writes
@@ -73,10 +119,8 @@ LOAD "HELLO.BAS"
 RUN
 ```
 
-The serial terminal displays PRINT output and prompts; the physical LCD shows
-the text and graphics buffers. `PRINT@` writes directly into the 64×16 buffer.
-`SCREEN` dumps that buffer to the serial terminal. The included renderer draws a few times a second during RUN, and after each
-command, so a long program is not one full panel update per PRINT. Rapid
+The window shows the same 64×16 text the panel is showing. `PRINT@` writes directly into that buffer.
+`SCREEN` dumps that buffer to the serial terminal. The panel updates when the program waits for input, on `CLS`, and when a command or program finishes, so a long program is not one full panel update per `PRINT`. Rapid
 graphics loops do not yet animate smoothly. `INPUT` uses the serial keyboard. `INKEY$` and
 `PEEK(14400)` poll the serial port when MicroPython exposes `select.poll` for
 the USB stream. Touch is not configured without a board model.

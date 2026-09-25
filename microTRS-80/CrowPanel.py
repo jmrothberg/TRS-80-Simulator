@@ -164,7 +164,10 @@ class SSD1683(framebuf.FrameBuffer):
 
 
     def _wait_until_idle(self):
-        while self.busy.value() == 1:
+        # Give up if BUSY stays high. An endless wait here froze the > prompt after DIR.
+        for _ in range(800):
+            if self.busy.value() != 1:
+                return
             sleep_ms(10)
 
 

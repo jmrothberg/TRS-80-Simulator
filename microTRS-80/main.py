@@ -8,6 +8,7 @@ import math
 import random
 import sys
 import os
+import time
 
 try:
     import select
@@ -248,6 +249,8 @@ class Basic:
         self.color_fg, self.color_bg = 2, 0
         self.cursor = 0
         self.dirty = True
+        # Last frame sent to the panel. The window asks for a copy with Ctrl-\.
+        self.last_frame = None
         self.tape = None
         self.channel = None
         self.keys = []
@@ -329,10 +332,18 @@ class Basic:
         box[idxs[-1]] = value
 
     def poll_key(self):
-        if self.keys:
-            return self.keys.pop(0)
-        if self.poller is not None and self.poller.poll(0):
-            return sys.stdin.read(1)
+        # A few Ctrl-\ can be waiting. Answer each with the panel frame, not as a key.
+        for _ in range(4):
+            if self.keys:
+                key = self.keys.pop(0)
+            elif self.poller is not None and self.poller.poll(0):
+                key = sys.stdin.read(1)
+            else:
+                return ''
+            if key == '\x1c':
+                self.resend()
+                continue
+            return key
         return ''
 
     def check_break(self):
@@ -382,14 +393,55 @@ class Basic:
             self.dirty = False
 
     def mirror(self):
-        """Send the real 64x16 and the cursor. ESC ] S, 4 digits, 1024 chars."""
+        """Frame the panel just drew: ESC ] S, cursor, then 1024 cells as hex."""
         cur = self.cursor
         if cur < 0:
             cur = 0
         if cur > 1023:
             cur = 1023
-        chars = ''.join(''.join(row) for row in self.screen)
-        self.output('\x1b]S%04d%s' % (cur, chars))
+        parts = []
+        for row in self.screen:
+            for ch in row:
+                code = ord(ch) if ch else 32
+                if code > 255:
+                    code = 32
+                parts.append('%02X' % code)
+        frame = '\x1b]S%04d%s' % (cur, ''.join(parts))
+        self.last_frame = frame
+        self._write_out(frame)
+
+    def _write_out(self, text):
+        # One 2KB stdout.write of the panel frame raised at READY after the
+        # cable was plugged back in, and str() of that error is blank, so the
+        # prompt showed "?ERROR" with no reason. Short pieces stay small enough
+        # for the UART write.
+        out = self.output
+        step = 64
+        n = len(text)
+        i = 0
+        while i < n:
+            out(text[i:i + step])
+            i += step
+        self.flush_out()
+
+    def resend(self):
+        """Repeat the last panel frame. Does not redraw the e-ink."""
+        if not self.last_frame:
+            return
+        try:
+            self._write_out(self.last_frame)
+        except Exception:
+            # A frame request must not become ?ERROR at the prompt.
+            return
+
+    def flush_out(self):
+        flush = getattr(sys.stdout, 'flush', None)
+        if flush is None:
+            return
+        try:
+            flush()
+        except Exception:
+            pass
 
     def eval(self, text):
         return Expression(self, text.strip()).parse()
@@ -646,6 +698,7 @@ class Basic:
                 self.keep_cont = True
                 self.cont_pc = self.pc
                 self.emit('BREAK IN ' + str(number) + '\n')
+                self.need_ready = True
             except (ValueError, ZeroDivisionError, IndexError, KeyError, TypeError) as exc:
                 self.erl = number
                 text = str(exc)
@@ -786,10 +839,8 @@ class Basic:
                         self.text_colors[n+i] = self.color_fg
                 self.dirty = True
             else: self.print_text(body)
-            # A running program refreshes from the run loop. Immediate PRINT
-            # still draws before the command returns.
-            if not self.running:
-                self.refresh()
+            # Immediate PRINT is drawn with the following > prompt. A running
+            # program waits for INPUT, CLS, or the end of RUN.
         elif word == 'CLS':
             self.screen = [[' '] * 64 for _ in range(16)]
             self.pixels = bytearray(len(self.pixels))
@@ -798,7 +849,10 @@ class Basic:
             self.cursor = 0
             self.dirty = True
             self.output('\x1b[2J\x1b[H')
-            self.refresh()
+            # Immediate CLS is drawn with the > prompt. A running program
+            # has to update now or the clear is invisible until it stops.
+            if self.running:
+                self.refresh()
         elif word in ('SET', 'RESET'):
             self.graphics(word, body)
         elif word == 'COLOR':
@@ -926,6 +980,7 @@ class Basic:
             self.running = False
             self.keep_cont = True
             self.cont_pc = self.pc
+            self.need_ready = True
         elif word == 'END':
             self.running = False
             self.cont_pc = None
@@ -982,7 +1037,7 @@ class Basic:
             if len(chunks) > 1:
                 self.emit(printable(self.eval(chunks[0])))
                 body = chunks[-1]
-            self.refresh()
+            # read_line draws once the "? " prompt is in the buffer, cursor after it.
             for name in split_top(body, ','):
                 answer = self.input_fn('? ')
                 if self.canon(name).endswith('$'):
@@ -1056,6 +1111,7 @@ class Basic:
             if number not in self.program:
                 raise ValueError('undefined line ' + str(number))
             self.emit(str(number) + ' ' + self.program[number] + '\n')
+            self.refresh()
             replacement = self.input_fn('')
             if str(replacement).strip():
                 self.program[number] = str(replacement).strip()
@@ -1100,18 +1156,43 @@ class Basic:
         elif line.upper() == 'HELP':
             self.emit('RUN LIST NEW LOAD SAVE DIR REMOVE TAPE SCREEN HELP. Esc breaks a running program.\n')
         else: self.execute(line)
-        # One panel update after the command, including text emit() just stored.
-        self.refresh()
+
+
+def show_prompt(basic, ready=False):
+    """Put the cursor just after >. READY is its own line, only at startup and break."""
+    if ready or getattr(basic, 'need_ready', False):
+        if basic.cursor % 64:
+            basic.emit('\n')
+        basic.emit('READY\n')
+        basic.need_ready = False
+    if basic.cursor % 64:
+        basic.emit('\n')
+    basic.emit('>')
+    # One panel update for the command text and this prompt together.
+    basic.refresh()
 
 
 def read_line(basic, prompt=''):
     """Read one console line. Echo goes to USB serial and the 64x16 screen."""
     if prompt:
         basic.emit(prompt)
+        basic.refresh()
     line = []
     while True:
-        ch = sys.stdin.read(1)
-        if not ch:
+        # 0xFF from a replugged CH340 is not UTF-8. Text read() raises, and
+        # str() of that error is empty, so the prompt printed a bare ?ERROR.
+        try:
+            ch = sys.stdin.read(1)
+        except (EOFError, OSError, UnicodeError, MemoryError, TypeError):
+            time.sleep(0.02)
+            continue
+        if isinstance(ch, (bytes, bytearray)):
+            if len(ch) != 1:
+                continue
+            ch = chr(ch[0])
+        # A broken UTF-8 byte can come back glued to the next keys as one string.
+        # ord() of that raises, and the prompt turned it into a blank ?ERROR.
+        if not ch or len(ch) != 1:
             continue
         if ch in '\r\n':
             basic.emit('\n')
@@ -1120,18 +1201,35 @@ def read_line(basic, prompt=''):
             if line:
                 line.pop()
                 basic.emit('\x08 \x08')
+                # Move the window caret back. Does not redraw the e-ink.
+                try:
+                    basic.mirror()
+                except Exception:
+                    pass
             continue
         if ch == '\x1b':
             # Esc breaks a running program. At READY it does nothing.
             if basic.running:
                 raise KeyboardInterrupt
             continue
+        if ch == '\x1c':
+            # The window asked for the picture that is already on the panel.
+            basic.resend()
+            continue
         if ch == '\x03':
             raise KeyboardInterrupt
         if ord(ch) < 32:
             continue
+        # The console is uppercase only. A typed "dir" is shown and stored as DIR.
+        if 'a' <= ch <= 'z':
+            ch = ch.upper()
         line.append(ch)
         basic.emit(ch)
+        # Keep the window caret on this line, right after the character just typed.
+        try:
+            basic.mirror()
+        except Exception:
+            pass
 
 
 def main():
@@ -1144,16 +1242,22 @@ def main():
     basic = Basic(hardware=hardware)
     basic.input_fn = lambda prompt='': read_line(basic, prompt)
     basic.emit('TRS-80 BASIC\nType HELP.\n')
-    basic.refresh()
+    basic.need_ready = False
+    show_prompt(basic, ready=True)
     while True:
         try:
-            basic.command(read_line(basic, 'READY> '))
+            basic.command(read_line(basic, ''))
         except KeyboardInterrupt:
             basic.emit('\nBREAK\n')
-            basic.refresh()
+            show_prompt(basic, ready=True)
+            continue
         except Exception as exc:
-            basic.emit('?ERROR ' + str(exc) + '\n')
-            basic.refresh()
+            # Some port errors stringify to nothing. Name them so it is not a blank ?ERROR.
+            msg = str(exc)
+            if not msg:
+                msg = type(exc).__name__
+            basic.emit('?ERROR ' + msg + '\n')
+        show_prompt(basic, ready=False)
 
 
 if __name__ == '__main__':

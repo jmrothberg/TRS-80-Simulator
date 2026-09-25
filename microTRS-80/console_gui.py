@@ -24,13 +24,20 @@ class Console(tk.Tk):
         self.cells = [[' '] * COLS for _ in range(ROWS)]
         self.cursor = 0
         self.esc = ''
-        self.snap = []
+        self.pending = b''
+        self.snap = b''
         self.snap_left = 0
         self.serial = None
         self.inbox = queue.Queue()
+        # Last text actually put in the widget. A repeat frame must not redraw.
+        self.painted = None
+        self.painted_cursor = -1
+        # Black ink on white paper, same as the e-ink. Green-on-black fought
+        # the widget's own white and the lower half flashed every few seconds.
         self.text = tk.Text(
             self, width=COLS, height=ROWS, wrap='none',
-            bg='black', fg='#33ff66', insertbackground='#33ff66',
+            bg='white', fg='black', insertbackground='black',
+            selectbackground='white', selectforeground='black',
             font=('DejaVu Sans Mono', 15), borderwidth=8, relief='flat',
             highlightthickness=0)
         self.text.pack()
@@ -39,9 +46,15 @@ class Console(tk.Tk):
             bg='black', fg='#1f7a32', font=('DejaVu Sans Mono', 11))
         self.status.pack(fill='x')
         self.text.bind('<Key>', self.on_key)
+        # A click must not move the caret. It stays just after > (the board cursor).
+        for seq in ('<Button-1>', '<B1-Motion>', '<ButtonRelease-1>',
+                    '<Shift-Button-1>', '<Double-Button-1>', '<Triple-Button-1>',
+                    '<Button-2>', '<Button-3>'):
+            self.text.bind(seq, self.keep_cursor)
         self.text.focus_set()
         self.protocol('WM_DELETE_WINDOW', self.close)
         self.after(40, self.drain)
+        self.after(2000, self.ask_frame)
         threading.Thread(target=self.reader, daemon=True).start()
 
     def reader(self):
@@ -52,10 +65,10 @@ class Console(tk.Tk):
             self.inbox.put(('status', 'Serial port not open: ' + str(exc)))
             return
         self.serial = port
-        self.inbox.put(('status', PORT + '  —  this keyboard talks to the board'))
-        # Ask the board to print READY> again if it was already waiting.
+        self.inbox.put(('status', PORT + '  —  this window shows the panel'))
+        # Ask for the frame already on the panel. A newline would be a command.
         try:
-            port.write(b'\n')
+            port.write(b'\x1c')
         except Exception:
             pass
         while True:
@@ -65,7 +78,7 @@ class Console(tk.Tk):
                 self.inbox.put(('status', 'Serial closed: ' + str(exc)))
                 return
             if data:
-                self.inbox.put(('bytes', data.decode('utf-8', 'replace')))
+                self.inbox.put(('bytes', data))
 
     def on_key(self, event):
         if self.serial is None:
@@ -94,6 +107,20 @@ class Console(tk.Tk):
             self.status.configure(text='Write failed: ' + str(exc))
         return 'break'
 
+    def keep_cursor(self, event):
+        """Leave the caret where the board put it, just after the prompt."""
+        self.text.focus_set()
+        self.place_cursor()
+        return 'break'
+
+    def place_cursor(self):
+        row, col = divmod(self.cursor, COLS)
+        if row >= ROWS:
+            row = ROWS - 1
+            col = COLS
+        self.text.mark_set('insert', '%d.%d' % (row + 1, col))
+        self.text.see('insert')
+
     def write_char(self, char):
         # Same cursor rules as Basic.screen_write on the board.
         if char == '\n':
@@ -118,52 +145,74 @@ class Console(tk.Tk):
                 self.cells.append([' '] * COLS)
                 self.cursor -= COLS
 
-    def feed(self, text):
-        for char in text:
+    def ask_frame(self):
+        # Keep asking. The board answers with the last picture it put on the panel.
+        if self.serial is not None:
+            try:
+                self.serial.write(b'\x1c')
+            except Exception:
+                pass
+        self.after(2000, self.ask_frame)
+
+    def apply_frame(self, raw):
+        """raw is 4 cursor digits plus 2048 hex digits, one byte per cell."""
+        try:
+            cur = int(raw[:4])
+            body = bytes.fromhex(raw[4:].decode('ascii'))
+        except (ValueError, UnicodeError):
+            return False
+        if len(body) != COLS * ROWS:
+            return False
+        self.cursor = cur if 0 <= cur < COLS * ROWS else 0
+        self.cells = []
+        for row in range(ROWS):
+            line = []
+            for col in range(COLS):
+                code = body[row * COLS + col]
+                line.append(chr(code) if code >= 32 else ' ')
+            self.cells.append(line)
+        return True
+
+    def feed(self, data):
+        """Take panel frames out of the byte stream. Other serial text is the monitor, not the screen."""
+        if isinstance(data, str):
+            data = data.encode('latin-1', 'replace')
+        self.pending += data
+        applied = False
+        while True:
             if self.snap_left:
-                self.snap.append(char)
-                self.snap_left -= 1
-                if self.snap_left == 0:
-                    raw = ''.join(self.snap)
-                    self.snap = []
-                    self.cursor = int(raw[:4])
-                    payload = raw[4:]
-                    self.cells = [list(payload[row * COLS:(row + 1) * COLS]) for row in range(ROWS)]
+                take = min(self.snap_left, len(self.pending))
+                self.snap += self.pending[:take]
+                self.pending = self.pending[take:]
+                self.snap_left -= take
+                if self.snap_left:
+                    break
+                applied = self.apply_frame(self.snap) or applied
+                self.snap = b''
                 continue
-            if self.esc:
-                self.esc += char
-                # Screen snapshot: ESC ] S, then cursor and the 64x16 the panel just drew.
-                if self.esc == '\x1b]S':
-                    self.esc = ''
-                    self.snap = []
-                    self.snap_left = 4 + COLS * ROWS
-                    continue
-                # CLS sends ESC [ 2 J and ESC [ H. Drop the whole sequence.
-                if char.isalpha():
-                    if self.esc == '\x1b[2J' or self.esc == '\x1b[H':
-                        if self.esc == '\x1b[2J':
-                            self.cells = [[' '] * COLS for _ in range(ROWS)]
-                            self.cursor = 0
-                    self.esc = ''
-                elif len(self.esc) > 8:
-                    self.esc = ''
-                continue
-            if char == '\x1b':
-                self.esc = char
-                continue
-            self.write_char(char)
+            mark = self.pending.find(b'\x1b]S')
+            if mark < 0:
+                if len(self.pending) > 3:
+                    self.pending = self.pending[-3:]
+                break
+            self.pending = self.pending[mark + 3:]
+            self.snap = b''
+            self.snap_left = 4 + COLS * ROWS * 2
+        return applied
 
     def paint(self):
-        lines = []
-        for row in range(ROWS):
-            chars = self.cells[row][:]
-            if self.cursor // COLS == row:
-                col = self.cursor % COLS
-                if chars[col] == ' ':
-                    chars[col] = '_'
-            lines.append(''.join(chars))
-        self.text.delete('1.0', 'end')
-        self.text.insert('1.0', '\n'.join(lines))
+        blob = '\n'.join(''.join(row) for row in self.cells)
+        # The board resends the same picture every couple of seconds.
+        # Wiping the widget to draw it again is the flash.
+        if blob != self.painted:
+            self.text.delete('1.0', 'end')
+            self.text.insert('1.0', blob)
+            self.painted = blob
+            # delete/insert parks the caret at the end. Put it back.
+            self.painted_cursor = -1
+        if self.cursor != self.painted_cursor:
+            self.painted_cursor = self.cursor
+            self.place_cursor()
 
     def drain(self):
         dirty = False
@@ -173,10 +222,26 @@ class Console(tk.Tk):
             except queue.Empty:
                 break
             if kind == 'bytes':
-                self.feed(payload)
-                dirty = True
+                if self.feed(payload):
+                    dirty = True
+                    self.status.configure(text=PORT + '  —  same 64x16 as the panel')
             else:
                 self.status.configure(text=payload)
+                # A failed open used to leave a blank window that looked dead.
+                if self.serial is None:
+                    self.cells = [[' '] * COLS for _ in range(ROWS)]
+                    row = col = 0
+                    for ch in payload:
+                        if ch == '\n' or col >= COLS:
+                            row += 1
+                            col = 0
+                            if ch == '\n':
+                                continue
+                        if row >= ROWS:
+                            break
+                        self.cells[row][col] = ch
+                        col += 1
+                    self.paint()
         if dirty:
             self.paint()
         self.after(40, self.drain)
