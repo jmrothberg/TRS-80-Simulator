@@ -15,10 +15,10 @@ def run(lines, answers=()):
 
 m, out = run(['10 FOR I=1 TO 3', '20 PRINT I;', '30 NEXT I',
               '40 IF I=4 THEN PRINT " OK" ELSE PRINT "BAD"', 'RUN'])
-assert out == '123 OK\n', repr(out)
+assert out == ' 1  2  3  OK\n', repr(out)
 m, out = run(['10 DIM A(3)', '20 A(2)=7', '30 PRINT A(2)',
               '40 DATA 12,"YES"', '50 READ N,S$', '60 PRINT N;S$', 'RUN'])
-assert out == '7\n12YES\n', repr(out)
+assert out == ' 7 \n 12 YES\n', repr(out)
 m, out = run(['10 SET(2,3)', '20 IF POINT(2,3) THEN GOSUB 50',
               '30 END', '50 PRINT "PIXEL"', '60 RETURN', 'RUN'])
 assert out == 'PIXEL\n', repr(out)
@@ -30,7 +30,7 @@ m, out = run(['10 ON 2 GOSUB 100,200', '20 PRINT "DONE"', '30 END',
 assert out == 'RIGHT\nDONE\n', repr(out)
 m, out = run(['10 COLOR 4,0', '20 SET(1,1,12)',
               '30 PRINT COLORAT(1,1)', 'RUN'])
-assert out == '12\n', repr(out)
+assert out == ' 12 \n', repr(out)
 with tempfile.TemporaryDirectory() as directory:
     board_config.SD_MOUNT = directory
     m, out = run(['10 INPUT#-1,V$', '20 PRINT V$',
@@ -59,4 +59,9 @@ with tempfile.TemporaryDirectory() as directory:
         assert saved.read() == 'A\n'
     assert m.eval('"A"="A"') == -1
     assert m.eval('"A"<>"B"') == -1
+m, out = run(['10 PRINT"HI"', '20 DIM A(2,2)', '30 A(2,1)=4',
+              '40 DEF FNX(N)=N*3', '50 PRINT A(2,1);FNX(2)',
+              '60 PRINT"AB";TAB(4);"Z"', '70 TOTAL=9', '80 PRINT TO', 'RUN'])
+assert out == 'HI\n 4  6 \nAB  Z\n 9 \n', repr(out)
+assert m.screen[2][4] == 'Z'
 print('ESP32 BASIC smoke checks passed')

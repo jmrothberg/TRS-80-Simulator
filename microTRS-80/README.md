@@ -24,16 +24,32 @@ initialization code and bus driver; the board model is needed to supply it.
 
 1. Flash MicroPython for your board. Connect a USB serial terminal.
 2. Copy `main.py`, `board_config.py`, `microtrs_hw.py`, and `font5x8.py` to the
-   board's root filesystem. For example, from this folder:
+   board's root filesystem. For the CrowPanel 5.79 also copy `display_driver.py`
+   and `CrowPanel.py`. From this folder:
 
    ```sh
-   mpremote connect auto fs cp main.py board_config.py microtrs_hw.py font5x8.py :
+   mpremote connect auto fs cp main.py board_config.py microtrs_hw.py font5x8.py display_driver.py CrowPanel.py :
    ```
 
 3. Fill in `board_config.py` for your SD pins and optional audio pin; add
    `display_driver.py` for your LCD and copy it to the board.
 4. Reset the ESP32. At `READY>`, enter numbered BASIC lines or commands.
    `Ctrl-C` interrupts execution.
+
+On the computer, the 64×16 window uses this keyboard and shows the same
+characters the panel draws in the center:
+
+```sh
+python3 microTRS-80/console_gui.py
+```
+
+The e-ink refresh is slow. The window updates as characters arrive. The
+panel catches up when the board finishes drawing that screen. Esc in that
+window breaks a running program.
+
+The CrowPanel microSD uses the same FAT32 cards as the FPGA. `LOAD "STARTREK"`
+reads `STARTREK.BAS` (then `.DAT`, `.JMR`, `.TXT`). `SAVE "FOO"` writes
+`FOO.BAS`. `DIR` lists the card root. `REMOVE "FOO"` deletes it.
 
 If the board firmware already mounts the SD card at `/sd`, leave
 `SD_SPI_PINS = None`. For a board with an SPI SD slot, set the tuple in the
@@ -59,9 +75,9 @@ RUN
 
 The serial terminal displays PRINT output and prompts; the physical LCD shows
 the text and graphics buffers. `PRINT@` writes directly into the 64×16 buffer.
-`SCREEN` dumps that buffer to the serial terminal. The included renderer draws
-after text output and at the end of each RUN, so rapid graphics loops do not
-yet animate smoothly. `INPUT` uses the serial keyboard. `INKEY$` and
+`SCREEN` dumps that buffer to the serial terminal. The included renderer draws a few times a second during RUN, and after each
+command, so a long program is not one full panel update per PRINT. Rapid
+graphics loops do not yet animate smoothly. `INPUT` uses the serial keyboard. `INKEY$` and
 `PEEK(14400)` poll the serial port when MicroPython exposes `select.poll` for
 the USB stream. Touch is not configured without a board model.
 
