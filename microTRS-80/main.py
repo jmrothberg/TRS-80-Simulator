@@ -16,6 +16,21 @@ except ImportError:
     select = None
 
 
+def _now_ms():
+    """Milliseconds. MicroPython has ticks_ms; the PC smoke test does not."""
+    ticks = getattr(time, 'ticks_ms', None)
+    if ticks is not None:
+        return ticks()
+    return int(time.time() * 1000)
+
+
+def _since_ms(then):
+    diff = getattr(time, 'ticks_diff', None)
+    if diff is not None:
+        return diff(_now_ms(), then)
+    return _now_ms() - then
+
+
 def split_top(s, delimiter):
     out, start, depth, quoted = [], 0, 0, False
     for i, ch in enumerate(s):
@@ -64,7 +79,23 @@ def _else_at(clause):
     return -1
 
 
+# The same statement text is tokenized again on every pass of a loop. The token
+# list is never changed after it is made, so keep it. Cleared when it gets big.
+_token_cache = {}
+
+
 def tokens(s):
+    got = _token_cache.get(s)
+    if got is not None:
+        return got
+    if len(_token_cache) > 2000:
+        _token_cache.clear()
+    got = _tokens(s)
+    _token_cache[s] = got
+    return got
+
+
+def _tokens(s):
     out, i = [], 0
     while i < len(s):
         c = s[i]
@@ -138,6 +169,11 @@ def statement_word(source):
     return word, raw[len(word):].strip()
 
 
+_PRIORITY = {'OR': 1, 'AND': 2, '=': 3, '<>': 3, '<': 3,
+             '>': 3, '<=': 3, '>=': 3, '+': 4, '-': 4,
+             '*': 5, '/': 5, 'MOD': 5, '^': 6}
+
+
 class Expression:
     def __init__(self, machine, source):
         self.machine = machine
@@ -189,9 +225,8 @@ class Expression:
                 left = self.machine.call(value, []) if value in ('INKEY$', 'RND', 'MEM', 'FRE', 'ERR', 'ERL', 'POS') else self.machine.get_var(value)
         else:
             raise ValueError('expected value')
-        priority = {'OR': 1, 'AND': 2, '=': 3, '<>': 3, '<': 3,
-                    '>': 3, '<=': 3, '>=': 3, '+': 4, '-': 4,
-                    '*': 5, '/': 5, 'MOD': 5, '^': 6}
+        # Module table. Building this dict on every call was a large share of math time.
+        priority = _PRIORITY
         while self.peek() in priority and priority[self.peek()] >= minimum:
             op = self.take()[1]
             p = priority[op]
@@ -254,6 +289,9 @@ class Basic:
         self.tape = None
         self.channel = None
         self.keys = []
+        self.key_look = 0
+        # Last byte from the USB window. None means no window has spoken yet.
+        self.host_seen = None
         # DEFINT/DEFSTR survive NEW and RUN. DEF FN and ON ERROR do not.
         self.deftype = {}
         self.fns = {}
@@ -337,13 +375,15 @@ class Basic:
             if self.keys:
                 key = self.keys.pop(0)
             else:
-                # Short watch. A long one here would slow every BASIC statement.
-                key = keyboard_char(200)
-                if not key:
-                    if self.poller is not None and self.poller.poll(0):
-                        key = sys.stdin.read(1)
-                    else:
+                # This runs before every statement. On the board, look at the
+                # keyboards only every 50 ms. Held-clock keys wait in the keyboard.
+                if self.hardware is not None:
+                    if _since_ms(self.key_look) < 50:
                         return ''
+                    self.key_look = _now_ms()
+                key = keyboard_char(3000) or _serial_char(self)
+                if not key:
+                    return ''
             if key == '\x1c':
                 self.resend()
                 continue
@@ -386,8 +426,16 @@ class Basic:
                 self.cursor -= 64
 
     def emit(self, text):
-        self.output(text)
+        if self.host_open():
+            self.output(text)
         self.screen_write(text)
+
+    def host_open(self):
+        """True if the USB window spoke in the last 6 s. It asks for a frame every 2 s.
+        With no window, text and frames are not sent, so the panel runs faster."""
+        if self.hardware is None:
+            return True
+        return self.host_seen is not None and _since_ms(self.host_seen) < 6000
 
     def refresh(self):
         if self.dirty and self.hardware is not None:
@@ -399,6 +447,8 @@ class Basic:
 
     def mirror(self):
         """Frame the panel just drew: ESC ] S, cursor, then 1024 cells as hex."""
+        if not self.host_open():
+            return
         cur = self.cursor
         if cur < 0:
             cur = 0
@@ -440,7 +490,7 @@ class Basic:
 
     def poke(self, index):
         """Tell the window one cell changed. A full frame per key is what made typing late."""
-        if index < 0 or index >= 1024:
+        if index < 0 or index >= 1024 or not self.host_open():
             return
         ch = self.screen[index // 64][index % 64]
         code = ord(ch) if ch else 32
@@ -1201,25 +1251,37 @@ def show_prompt(basic, ready=False):
 
 # MicroPython functions cannot hold attributes, so the loader is a module global.
 _keyboard_fn = None
+# One listen can return several keys. The extras wait here.
+_keyboard_keys = []
 
 
 def keyboard_char(wait_us):
-    """One PS/2 character, or '' . USB is unchanged when no keyboard code is loaded."""
+    """One PS/2 character, or '' . Listens at most wait_us when nothing is waiting."""
     global _keyboard_fn
+    if _keyboard_keys:
+        return _keyboard_keys.pop(0)
     if _keyboard_fn is None:
         try:
-            from microtrs_hw import ps2_char
-            _keyboard_fn = ps2_char
+            from microtrs_hw import ps2_keys
+            _keyboard_fn = ps2_keys
         except ImportError:
             def _keyboard_fn(wait_us=0):
-                return ''
-    return _keyboard_fn(wait_us)
+                return []
+    _keyboard_keys.extend(_keyboard_fn(wait_us))
+    if _keyboard_keys:
+        return _keyboard_keys.pop(0)
+    return ''
 
 
 def _serial_char(basic):
     """One USB character already waiting, or '' . Does not block."""
     if basic.poller is None:
         return ''
+    # No window open: look at USB 4 times a second, not on every pass.
+    if basic.hardware is not None and not basic.host_open():
+        if _since_ms(getattr(basic, 'usb_look', 0)) < 250:
+            return ''
+        basic.usb_look = _now_ms()
     try:
         if not basic.poller.poll(0):
             return ''
@@ -1239,23 +1301,12 @@ def _serial_char(basic):
     # ord() of that raises, and the prompt turned it into a blank ?ERROR.
     if not ch or len(ch) != 1:
         return ''
+    basic.host_seen = _now_ms()
     return ch
-
-
-def _read_char(basic):
-    """One character from USB or the PS/2 keyboard. '' if neither is ready."""
-    # The window key is already in the UART. Do not wait on the PS/2 clock first.
-    ch = _serial_char(basic)
-    if ch:
-        return ch
-    return keyboard_char(1500) or ''
 
 
 def read_line(basic, prompt=''):
     """Read one console line. The window updates per key. The panel paints in batches."""
-    if prompt:
-        basic.emit(prompt)
-        basic.refresh()
     line = []
     done = False
     last_edit = 0
@@ -1273,7 +1324,7 @@ def read_line(basic, prompt=''):
                 line.pop()
                 basic.emit('\x08 \x08')
                 basic.echo_cell(basic.cursor)
-                last_edit = time.ticks_ms()
+                last_edit = _now_ms()
             return
         if ch == '\x1b':
             # Esc breaks a running program. At READY it does nothing.
@@ -1294,37 +1345,20 @@ def read_line(basic, prompt=''):
         line.append(ch)
         basic.emit(ch)
         basic.echo_cell(basic.cursor - 1)
-        last_edit = time.ticks_ms()
+        last_edit = _now_ms()
 
-    try:
-        from microtrs_hw import ps2_hold, ps2_poll
-    except ImportError:
-        ps2_hold = None
-
-        def ps2_poll(wait_us=0):
-            return []
-
-    def take_panel_keys(wait_us):
-        # Let the keyboard send, grab the whole burst, then hold the clock while we echo.
-        if ps2_hold is not None:
-            ps2_hold(False)
-        keys = ps2_poll(wait_us)
-        if not done and ps2_hold is not None:
-            ps2_hold(True)
-        for ch in keys:
-            apply_key(ch)
-            if done:
-                break
-
-    def pump():
-        # Called while the panel is busy. Take every key already waiting.
+    def take_keys():
+        # Every key waiting: USB from the UART FIFO, then one short listen on
+        # the panel keyboard. Also runs during the e-ink paint.
         while not done:
-            ch = _serial_char(basic)
+            # Keys typed while the program ran were saved by check_break. They come first.
+            if basic.keys:
+                ch = basic.keys.pop(0)
+            else:
+                ch = _serial_char(basic) or keyboard_char(3000)
             if not ch:
-                break
+                return
             apply_key(ch)
-        if not done:
-            take_panel_keys(2500)
 
     panel = None
     hw = basic.hardware
@@ -1332,42 +1366,32 @@ def read_line(basic, prompt=''):
     if disp is not None:
         panel = getattr(disp, 'panel', None)
 
-    try:
-        while not done:
-            # Hold the panel keyboard while the window keys are echoed, so its burst stays queued.
-            if ps2_hold is not None:
-                ps2_hold(True)
-            while not done:
-                ch = _serial_char(basic)
-                if not ch:
-                    break
-                apply_key(ch)
-            if done:
-                break
-            take_panel_keys(1500)
-            if done:
-                break
-            if not basic.dirty or basic.hardware is None:
-                continue
-            # A burst of keys is one paint. A key that arrives during the paint
-            # is held and goes out on the next paint, not as its own refresh.
-            now = time.ticks_ms()
-            if not catch_up and time.ticks_diff(now, last_edit) < 100:
-                continue
-            catch_up = False
+    def paint():
+        nonlocal catch_up
+        if panel is not None:
+            panel.while_busy = take_keys
+        try:
+            basic.refresh()
+        finally:
             if panel is not None:
-                panel.while_busy = pump
-            try:
-                basic.refresh()
-            finally:
-                if panel is not None:
-                    panel.while_busy = None
-            if basic.dirty:
-                catch_up = True
-    finally:
-        # Leave the clock free when the line is finished, including after Esc.
-        if ps2_hold is not None:
-            ps2_hold(False)
+                panel.while_busy = None
+        # Keys that came in during the paint go out on the next one right away.
+        catch_up = basic.dirty
+
+    if prompt:
+        basic.emit(prompt)
+        paint()
+    while not done:
+        take_keys()
+        if done:
+            break
+        # Nothing changed: no paint. The page only redraws after typing.
+        if not basic.dirty or basic.hardware is None:
+            continue
+        # One paint after a 400 ms pause in typing, not one per key.
+        if not catch_up and _since_ms(last_edit) < 400:
+            continue
+        paint()
     return ''.join(line)
 
 

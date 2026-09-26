@@ -53,56 +53,51 @@ class Hardware:
         # Read keys a few times while the glyphs are drawn. The panel paint is the long part.
         panel = getattr(d, 'panel', None)
         hook = getattr(panel, 'while_busy', None) if panel is not None else None
-        # Clock held low makes the panel keyboard store keys until the hook reads them.
-        if hook is not None:
-            ps2_hold(True)
-        try:
-            d.fill(bg)
-            for y in range(48):
-                if hook is not None and y % 8 == 0:
-                    try:
-                        hook()
-                    except Exception:
-                        pass
-                for x in range(128):
-                    bit = y * 128 + x
-                    if machine.pixels[bit // 8] & (1 << (bit % 8)):
-                        px = left + x * scale_x // 2
-                        py = top + y * scale_y // 3
-                        color = cfg.PALETTE[machine.pixel_colors.get(bit, machine.color_fg)]
-                        d.fill_rect(px, py, max(1, scale_x // 2), max(1, scale_y // 3), color)
-            for row in range(16):
-                if hook is not None and row % 4 == 0:
-                    try:
-                        hook()
-                    except Exception:
-                        pass
-                for col in range(64):
-                    character = machine.screen[row][col]
-                    glyph = FONT.get(character)
-                    if glyph:
-                        px, py = left + col * scale_x, top + row * scale_y
-                        ink = cfg.PALETTE[machine.text_colors[row * 64 + col]]
-                        # 5x8 glyph, plus a 1-pixel gap. Grow it to fill the cell
-                        # so the console is readable in the center of a large panel.
-                        gs = max(1, min(scale_x // 6, scale_y // 8))
-                        for gx, bits in enumerate(glyph):
-                            for gy in range(8):
-                                if bits & (1 << gy):
-                                    d.fill_rect(px + gx * gs, py + gy * gs, gs, gs, ink)
-            # Fast update always repaints the whole panel, so the cursor is a solid
-            # block in the next-key cell. A blink would refresh the page every time.
-            cur = machine.cursor
-            if 0 <= cur < 1024:
-                row, col = divmod(cur, 64)
-                px, py = left + col * scale_x, top + row * scale_y
-                # Any non-zero color is black ink on this panel.
-                d.fill_rect(px, py, scale_x, scale_y, 1)
-            if hasattr(d, 'show'):
-                d.show()
-        finally:
-            if hook is not None:
-                ps2_hold(False)
+        # The keyboard clock is always held low outside ps2_keys(), so keys
+        # typed during this paint wait inside the keyboard until the hook listens.
+        d.fill(bg)
+        for y in range(48):
+            if hook is not None and y % 8 == 0:
+                try:
+                    hook()
+                except Exception:
+                    pass
+            for x in range(128):
+                bit = y * 128 + x
+                if machine.pixels[bit // 8] & (1 << (bit % 8)):
+                    px = left + x * scale_x // 2
+                    py = top + y * scale_y // 3
+                    color = cfg.PALETTE[machine.pixel_colors.get(bit, machine.color_fg)]
+                    d.fill_rect(px, py, max(1, scale_x // 2), max(1, scale_y // 3), color)
+        for row in range(16):
+            if hook is not None and row % 4 == 0:
+                try:
+                    hook()
+                except Exception:
+                    pass
+            for col in range(64):
+                character = machine.screen[row][col]
+                glyph = FONT.get(character)
+                if glyph:
+                    px, py = left + col * scale_x, top + row * scale_y
+                    ink = cfg.PALETTE[machine.text_colors[row * 64 + col]]
+                    # 5x8 glyph, plus a 1-pixel gap. Grow it to fill the cell
+                    # so the console is readable in the center of a large panel.
+                    gs = max(1, min(scale_x // 6, scale_y // 8))
+                    for gx, bits in enumerate(glyph):
+                        for gy in range(8):
+                            if bits & (1 << gy):
+                                d.fill_rect(px + gx * gs, py + gy * gs, gs, gs, ink)
+        # Fast update always repaints the whole panel, so the cursor is a solid
+        # block in the next-key cell. A blink would refresh the page every time.
+        cur = machine.cursor
+        if 0 <= cur < 1024:
+            row, col = divmod(cur, 64)
+            px, py = left + col * scale_x, top + row * scale_y
+            # Any non-zero color is black ink on this panel.
+            d.fill_rect(px, py, scale_x, scale_y, 1)
+        if hasattr(d, 'show'):
+            d.show()
 
     def draw_cells(self, machine, indexes):
         """Redraw only the cells that a key just changed, then a partial panel update."""
@@ -884,81 +879,38 @@ def ps2_start():
     # One edge is about 50 us. 400 us still finishes the frame if the count is a bit short.
     _edge_spins = _spins_per_us * 400
     _ps2_on = True
+    # The clock is held low at all times except inside ps2_keys(). Held low,
+    # the keyboard stores keys and resends any byte that was cut off, so keys
+    # typed while BASIC is busy or the e-ink is painting are not lost.
+    _ps2_inhibit()
 
 
-def ps2_hold(hold):
-    """Hold the clock low so the keyboard queues keys, or let it send again."""
+def _ps2_inhibit():
     global _ps2_held
-    if not _ps2_on or _ps2_clk is None:
-        return
-    if hold:
-        if _ps2_held:
-            return
-        # The keyboard stops sending and keeps the keys until the clock is released.
-        _ps2_clk.init(_Pin.OUT)
-        _ps2_clk.value(0)
-        _ps2_held = True
-        return
-    if not _ps2_held:
-        return
-    _ps2_clk.init(_Pin.IN, _Pin.PULL_UP)
-    _ps2_held = False
-    time.sleep_us(100)
+    _ps2_clk.init(_Pin.OUT)
+    _ps2_clk.value(0)
+    _ps2_held = True
 
 
-def ps2_char(wait_us=0):
-    """One typed character, or '' if the clock was idle for wait_us."""
-    if not _ps2_on:
-        return ''
-    tries = 0
-    while tries < 4:
-        tries += 1
-        budget = wait_us if tries == 1 else 1500
-        if budget <= 0:
-            return ''
-        if budget > 4000:
-            budget = 4000
-        state = _irq_disable()
-        try:
-            scan = _ps2_frame(_clk_bit, _dat_bit, _edge_spins, budget * _spins_per_us)
-        finally:
-            _irq_restore(state)
-        if scan < 0:
-            return ''
-        ch = _ps2_decode(scan)
-        if ch:
-            return ch
-    return ''
-
-
-def ps2_poll(wait_us=1500):
-    """Every character in one clock burst. Break codes stay paired with their key."""
-    if not _ps2_on:
+def ps2_keys(wait_us=3000):
+    """Release the clock, read what the keyboard sends, then hold it low again."""
+    if not _ps2_on or _ps2_burst is None:
         return []
-    if _ps2_burst is None:
-        ch = ps2_char(wait_us)
-        if ch:
-            return [ch]
-        return []
-    if wait_us <= 0:
-        return []
-    if wait_us > 4000:
-        wait_us = 4000
-    gap = _spins_per_us * 800
-    if gap < 1:
-        gap = 1
+    if wait_us > 5000:
+        wait_us = 5000
+    # 2 ms of quiet after a byte ends the burst. Queued bytes follow each other faster.
+    gap = _spins_per_us * 2000
     state = _irq_disable()
     try:
+        # The keyboard needs the clock low at least 100 us to see it as held.
+        # A back-to-back call could release it sooner and garble a byte.
+        time.sleep_us(120)
+        _ps2_clk.init(_Pin.IN, _Pin.PULL_UP)
         n = _ps2_burst(_clk_bit, _dat_bit, _edge_spins, wait_us * _spins_per_us, gap, _ps2_raw)
-    except Exception:
-        n = -1
+        _ps2_clk.init(_Pin.OUT)
+        _ps2_clk.value(0)
     finally:
         _irq_restore(state)
-    if n < 0:
-        ch = ps2_char(wait_us)
-        if ch:
-            return [ch]
-        return []
     if n > 16:
         n = 16
     found = []
