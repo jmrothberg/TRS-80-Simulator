@@ -5,6 +5,7 @@ This window is the keyboard. Characters from the board are placed in the
 same 64x16 grid the e-ink draws in the center of the CrowPanel.
 """
 
+import os
 import queue
 import sys
 import threading
@@ -33,10 +34,13 @@ class Console(tk.Tk):
         # Last text actually put in the widget. A repeat frame must not redraw.
         self.painted = None
         self.painted_cursor = -1
+        # Paper row: 64x16 console, then the TRS-80 badge in the leftover strip.
+        paper = tk.Frame(self, bg='white')
+        paper.pack(fill='both', expand=True)
         # Black ink on white paper, same as the e-ink. Green-on-black fought
         # the widget's own white and the lower half flashed every few seconds.
         self.text = tk.Text(
-            self, width=COLS, height=ROWS, wrap='none',
+            paper, width=COLS, height=ROWS, wrap='none',
             bg='white', fg='black', insertbackground='black',
             selectbackground='white', selectforeground='black',
             font=('DejaVu Sans Mono', 15), borderwidth=8, relief='flat',
@@ -44,7 +48,8 @@ class Console(tk.Tk):
         # The I-beam sat above and left of ">". A block in the cursor cell is the caret.
         self.text.tag_configure('caret', background='black', foreground='white')
         self.caret_on = True
-        self.text.pack()
+        self.text.pack(side='left', fill='both', expand=True)
+        self._build_badge(paper)
         self.status = tk.Label(
             self, text='Connecting to ' + PORT + ' ...',
             bg='black', fg='#1f7a32', font=('DejaVu Sans Mono', 11))
@@ -61,6 +66,26 @@ class Console(tk.Tk):
         self.after(500, self.blink_caret)
         self.after(2000, self.ask_frame)
         threading.Thread(target=self.reader, daemon=True).start()
+
+    def _build_badge(self, parent):
+        """Right strip: TRS-80 photo, then caption directly under it. GUI-only."""
+        strip = tk.Frame(parent, bg='white', borderwidth=0, highlightthickness=0)
+        strip.pack(side='right', fill='y')
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trs80_badge.png')
+        self._badge_photo = None
+        if os.path.isfile(path):
+            try:
+                self._badge_photo = tk.PhotoImage(file=path)
+            except tk.TclError:
+                self._badge_photo = None
+        if self._badge_photo is not None:
+            tk.Label(strip, image=self._badge_photo, bg='white', borderwidth=0).pack(
+                side='top', padx=4, pady=(12, 0))
+        # Directly under the photo, not at the bottom of the window.
+        tk.Label(
+            strip, text="JMR's\nTRS-80-\nSimulator",
+            bg='white', fg='black', justify='center',
+            font=('DejaVu Sans', 9, 'bold')).pack(side='top', pady=(8, 12))
 
     def reader(self):
         try:

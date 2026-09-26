@@ -183,9 +183,37 @@ between boards. Set the SD and speaker GPIOs in `board_config.py`. To enable
 the LCD, add `display_driver.py` with a `create_display()` function that returns
 an initialized driver with `fill(color)` and
 `fill_rect(x, y, width, height, color)` methods and optional `show()`.
-Set `DISPLAY_WIDTH` and `DISPLAY_HEIGHT` to the LCD's pixel dimensions.
-The included `microtrs_hw.py` draws 5×8 glyphs and graphics pixels in a
-480×320 viewport by default. A particular LCD still needs its own
+Set `DISPLAY_WIDTH` and `DISPLAY_HEIGHT` to the panel's pixel dimensions.
+On this CrowPanel that is **792 × 272**.
+
+### Text and graphics scaling
+
+The console is always a logical **64 × 16** character grid. The draw path in
+`microtrs_hw.py` picks cell size from the panel:
+
+- `scale_x = DISPLAY_WIDTH // 64` (here `792 // 64` → **12**)
+- `scale_y = DISPLAY_HEIGHT // 16` (here `272 // 16` → **17**)
+- Text block size: `64 * scale_x` by `16 * scale_y` → **768 × 272**
+- Centering: leftover pixels are split left/right (here **12** on each side).
+  Top/bottom leftover is 0 on this panel because `16 * 17` fills the height.
+
+So the glyphs use **768 of 792** horizontal pixels, not 640. A scale of 10
+would be 640 wide and leave ~152 px free for a side badge; that is not what
+runs on the board today. The PC window may show a decorative TRS-80 badge for
+layout experiments; that does not change the panel math until the draw path
+is updated on purpose.
+
+`SET` / `RESET` / `POINT` use the same `scale_x` / `scale_y`. The Level II
+graphics grid is **128 × 48** (two pixels across each character cell, three
+down), so each graphics pixel is drawn as:
+
+- width `scale_x // 2`, height `scale_y // 3`
+- origin `left + x * (scale_x // 2)`, `top + y * (scale_y // 3)`
+
+Text cells and `SET` pixels therefore stay locked to the same center and scale.
+
+The included `microtrs_hw.py` draws 5×8 glyphs and those graphics pixels into
+that centered viewport. A particular panel still needs its own
 initialization code and bus driver; the board model is needed to supply it.
 
 ## Installation
